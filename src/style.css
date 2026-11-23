@@ -1,0 +1,274 @@
+/* Unleash stylesheet (based on Burrow's). Colours come from @define-color tokens generated from the active rice.
+   $R / $R_SMALL / $R_BIG / $SHADOW / $MOTION / $FONT are filled in by theme.rs. */
+
+* {
+  font-family: "$FONT", sans-serif;
+  transition-duration: $MOTION;
+  -gtk-icon-shadow: none;
+}
+
+window.unleash {
+  background: transparent;
+  color: @text;
+}
+.unleash-root {
+  background: @win_bg;
+  border-radius: $R;
+}
+
+/* ---------------- toolbar / path bar ---------------- */
+.toolbar {
+  background: transparent;
+  box-shadow: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid @wine;
+}
+.toolbar > button, button.flat-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  color: @text_dim;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: $R_SMALL;
+}
+.toolbar > button:hover, button.flat-btn:hover { background: @surface_alt; color: @text; }
+.toolbar > button:disabled { opacity: 0.35; }
+.toolbar > button:checked { background: @sel_bg; color: @text; border-color: @crimson; }
+
+.pathbar {
+  background: @surface;
+  border: 1px solid @wine;
+  border-radius: $R_SMALL;
+  min-height: 34px;
+  padding: 0 4px;
+}
+.pathbar:focus-within { border-color: @crimson; }
+.crumb {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: @text_dim;
+  padding: 2px 8px;
+  min-height: 26px;
+  border-radius: $R_SMALL;
+  font-weight: 500;
+}
+.crumb:hover { background: @surface_alt; color: @text; }
+.crumb.current { color: @text; font-weight: 700; }
+.crumb-sep { color: @text_faint; }
+entry.path-entry, entry.filter-entry {
+  background: @surface;
+  color: @text;
+  border: 1px solid @wine;
+  border-radius: $R_SMALL;
+  min-height: 34px;
+  box-shadow: none;
+  caret-color: @accent_hot;
+}
+entry.path-entry:focus-within, entry.filter-entry:focus-within { border-color: @crimson; }
+entry.path-entry { font-family: monospace; }
+entry selection, text selection { background: @wine; color: @text; }
+
+/* ---------------- states ---------------- */
+.state-box { padding: 40px; }
+.state-icon { color: @text_faint; }
+.state-title { font-size: 18px; font-weight: 700; color: @text; }
+.state-text { font-size: 13px; color: @text_faint; }
+.state-box.error .state-icon { color: @danger; }
+.skeleton {
+  background: alpha(@text, 0.06);
+  border-radius: $R_SMALL;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.skeleton.reduced { animation: none; }
+@keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+
+/* ---------------- status bar ---------------- */
+.statusbar {
+  padding: 6px 14px;
+  border-top: 1px solid @wine;
+  font-size: 12px;
+  color: @text_faint;
+}
+.pill {
+  background: alpha(@text, 0.06);
+  border: 1px solid @wine;
+  border-radius: 99px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: @text_dim;
+}
+.pill-dot { min-width: 7px; min-height: 7px; border-radius: 99px; background: @success; }
+
+
+/* ---------------- buttons ---------------- */
+button.primary {
+  background: @accent;
+  color: @on_accent;
+  border: none;
+  border-radius: $R_SMALL;
+  padding: 6px 14px;
+  font-weight: 700;
+  box-shadow: $SHADOW;
+}
+button.primary:hover { background: mix(@accent, white, 0.08); }
+button.primary:disabled { opacity: 0.4; box-shadow: none; }
+button.secondary {
+  background: @surface;
+  color: @text;
+  border: 1px solid @wine;
+  border-radius: $R_SMALL;
+  padding: 6px 14px;
+  box-shadow: none;
+}
+button.secondary:hover { background: @surface_alt; border-color: @crimson; }
+
+/* ---------------- popovers / menus ---------------- */
+popover > contents, popover.menu > contents {
+  background: @surface;
+  border: 1px solid @crimson;
+  border-radius: $R;
+  box-shadow: none;
+  color: @text;
+  padding: 6px;
+}
+popover > arrow { background: @surface; border-color: @crimson; }
+popover modelbutton { border-radius: $R_SMALL; padding: 6px 10px; color: @text_dim; }
+popover modelbutton:hover,
+popover modelbutton:selected,
+popover modelbutton:focus,
+popover modelbutton:active { background: @surface_alt; color: @text; box-shadow: none; outline: none; }
+
+tooltip, tooltip.background {
+  background: @bg_deep;
+  color: @text;
+  border: 1px solid @crimson;
+  border-radius: $R_SMALL;
+}
+
+scrollbar { background: transparent; border: none; }
+scrollbar slider { background: alpha(@text, 0.25); border-radius: 99px; min-width: 6px; min-height: 6px; border: none; }
+scrollbar slider:hover { background: @crimson; }
+
+
+
+gridview.files.compact .cell { padding: 4px 8px; }
+/* padding here would push the rows under the header */
+columnview.files { background: transparent; color: @text_dim; padding: 0; }
+columnview.files > header {
+  background: transparent;
+  border-bottom: 1px solid @wine;
+}
+columnview.files > header > button {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: @text_faint;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+columnview.files > header > button:hover { color: @text; }
+columnview.files > header > button sort-indicator { color: @accent_hot; }
+columnview.files > listview { background: transparent; padding: 4px 0; }
+columnview.files > listview > row {
+  background: transparent;
+  border-radius: $R_SMALL;
+  border: 1px solid transparent;
+  padding: 2px 0;
+}
+columnview.files > listview > row:hover { background: @hover_bg; color: @text; }
+columnview.files > listview > row:selected { background: @sel_bg; border-color: @crimson; color: @text; }
+columnview.files > listview > row > cell { padding: 0; }
+columnview.files .cell { padding: 3px 10px; }
+.file-meta { font-size: 12px; color: @text_faint; }
+columnview.files > listview > row:selected .file-meta { color: @text_dim; }
+.band { background: alpha(@accent, 0.18); border: 1px solid @crimson; }
+
+scale value { color: @text_faint; font-size: 11px; }
+popover listview, popover list { background: transparent; color: @text_dim; }
+popover listview row:hover, popover.menu row:hover { background: @surface_alt; }
+popover listview row:selected { background: @sel_bg; }
+
+/* ---------------- danger ---------------- */
+button.danger {
+  background: @danger;
+  color: @bg_deep;
+  border: none;
+  border-radius: $R_SMALL;
+  padding: 6px 14px;
+  font-weight: 700;
+  box-shadow: none;
+}
+gridview.files > child .drop-hover, columnview.files .drop-hover {
+  background: @sel_bg;
+  border-radius: $R_SMALL;
+  box-shadow: inset 0 0 0 2px @accent_hot;
+}
+stack:focus-visible { outline: none; }
+*:focus-visible { outline-color: alpha(@accent_hot, 0.85); }
+checkbutton check { background: @bg; border: 1px solid @crimson; border-radius: 4px; color: @on_accent; }
+checkbutton check:checked { background: @accent; border-color: @accent; }
+checkbutton { color: @text_dim; }
+
+/* ---------------- Unleash ---------------- */
+.toolbar > button.tool-btn, .toolbar > menubutton.tool-btn > button {
+  padding: 0 10px;
+  min-width: 0;
+}
+.toolbar .tool-btn label { font-weight: 600; font-size: 13px; }
+.toolbar > menubutton.tool-btn > button {
+  background: transparent; border: 1px solid transparent; box-shadow: none; color: @text_dim;
+  min-height: 32px; border-radius: $R_SMALL;
+}
+.toolbar > menubutton.tool-btn > button:hover { background: @surface_alt; color: @text; }
+.toolbar > button.primary { min-height: 32px; padding: 0 14px; }
+.app-name { font-size: 15px; font-weight: 800; color: @text; padding: 0 6px; }
+.name-cell image { color: @text_dim; }
+.name-cell .folder-icon { color: @accent_hot; }
+.lock { color: @accent_hot; }
+
+/* progress strip above the status bar */
+.jobbar {
+  padding: 8px 14px;
+  border-top: 1px solid @wine;
+  background: @surface;
+}
+.jobbar label { font-size: 12px; color: @text_dim; }
+.jobbar .job-title { font-weight: 700; color: @text; }
+progressbar.job trough {
+  background: alpha(@text, 0.1);
+  border-radius: 99px;
+  min-height: 6px;
+  border: none;
+}
+progressbar.job progress {
+  background: @accent;
+  border-radius: 99px;
+  min-height: 6px;
+  border: none;
+}
+.jobbar.error { background: alpha(@danger, 0.12); }
+.jobbar.error .job-title { color: @danger; }
+.jobbar.done .job-title { color: @success; }
+
+/* empty window */
+.drop-zone {
+  margin: 24px;
+  border: 2px dashed @wine;
+  border-radius: $R_BIG;
+}
+.drop-zone.hover, .unleash-root.drop-hover .drop-zone { border-color: @accent_hot; background: alpha(@accent, 0.08); }
+.drop-zone .state-icon { color: @accent_hot; }
+
+/* drag icon */
+.drag-chip {
+  background: @surface;
+  border: 1px solid @crimson;
+  border-radius: $R_SMALL;
+  padding: 6px 10px;
+  color: @text;
+  font-weight: 600;
+}
