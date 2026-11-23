@@ -24,6 +24,8 @@ pub struct Win {
     paths: RicePaths,
     cfg: RefCell<Config>,
     tokens: RefCell<Tokens>,
+    /// resolved off the UI thread (settings.ini may be read)
+    icon_theme: RefCell<Option<String>>,
     rice_monitors: RefCell<Vec<gio::FileMonitor>>,
     debounce: RefCell<Option<glib::SourceId>>,
 
@@ -83,6 +85,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
     let paths = RicePaths::from_env();
     let cfg = config::load();
     let tokens = theme::load_choice(&paths, &cfg.appearance.colors);
+    let icon_theme = config::icon_theme(&cfg);
     let provider = gtk::CssProvider::new();
     if let Some(d) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&d, &provider, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
@@ -249,6 +252,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
         paths,
         cfg: RefCell::new(cfg),
         tokens: RefCell::new(tokens),
+        icon_theme: RefCell::new(icon_theme),
         rice_monitors: RefCell::new(vec![]),
         debounce: RefCell::new(None),
         arc: RefCell::new(None),
@@ -296,6 +300,11 @@ impl Win {
     // ------------------------------------------------------------------ theme
     fn apply_theme(&self) {
         let cfg = self.cfg.borrow();
+        if let (Some(t), Some(s)) = (self.icon_theme.borrow().clone(), gtk::Settings::default()) {
+            if s.gtk_icon_theme_name().as_deref() != Some(t.as_str()) {
+                s.set_gtk_icon_theme_name(Some(&t));
+            }
+        }
         let a = theme::Appearance { font: cfg.appearance.font.clone(), opacity: cfg.appearance.opacity, ..Default::default() };
         self.provider.load_from_string(&theme::css(&self.tokens.borrow(), &a));
     }
@@ -345,10 +354,11 @@ impl Win {
             let paths = w.paths.clone();
             let weak = Rc::downgrade(&w);
             glib::spawn_future_local(async move {
-                let Ok((cfg, t)) = gio::spawn_blocking(move || {
+                let Ok((cfg, t, icons)) = gio::spawn_blocking(move || {
                     let cfg = config::load();
                     let t = theme::load_choice(&paths, &cfg.appearance.colors);
-                    (cfg, t)
+                    let icons = config::icon_theme(&cfg);
+                    (cfg, t, icons)
                 })
                 .await
                 else {
@@ -356,6 +366,7 @@ impl Win {
                 };
                 let Some(w) = weak.upgrade() else { return };
                 let rewatch = w.tokens.borrow().rice_id != t.rice_id || w.cfg.borrow().appearance.colors != cfg.appearance.colors;
+                *w.icon_theme.borrow_mut() = icons;
                 if *w.tokens.borrow() != t || *w.cfg.borrow() != cfg {
                     *w.tokens.borrow_mut() = t;
                     *w.cfg.borrow_mut() = cfg;
