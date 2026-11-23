@@ -10,7 +10,7 @@ repository = "https://github.com/AriCuteGirl/unleash"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.2"
-zip = { version = "8", default-features = false, features = ["deflate-flate2", "aes-crypto"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2", "aes-crypto"] }
 tar = "0.4"
 flate2 = "1"
 zstd = "0.13"
