@@ -9,6 +9,7 @@
 //! destination under free names, so nothing is ever overwritten and a cancelled or failed
 //! extract leaves nothing half-done behind.
 
+pub mod check;
 pub mod create;
 mod crates;
 pub mod modify;

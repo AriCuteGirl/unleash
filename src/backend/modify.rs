@@ -85,6 +85,83 @@ pub fn delete(archive: &Path, l: &Listing, paths: &[String], p: &Progress) -> Re
     })
 }
 
+/// Rename one entry (a folder takes everything inside along) to `new_name` in the same folder.
+pub fn rename(archive: &Path, l: &Listing, from: &str, new_name: &str, p: &Progress) -> Result<(), String> {
+    can_modify(l)?;
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
+        return Err("That name isn't allowed".into());
+    }
+    let to = match from.rfind('/') {
+        Some(i) => format!("{}/{new_name}", &from[..i]),
+        None => new_name.to_string(),
+    };
+    if to == from {
+        return Ok(());
+    }
+    let taken = |x: &str| l.entries.iter().any(|e| e.path == x || e.path.starts_with(&format!("{x}/")));
+    if taken(&to) {
+        return Err(format!("There's already something called {new_name} there"));
+    }
+    if !taken(from) {
+        return Err(format!("{from} isn't in the archive"));
+    }
+    let moved = |path: &str| -> Option<String> { selected(path, std::slice::from_ref(&from.to_string())).then(|| format!("{to}{}", &path[from.len()..])) };
+    p.total.store(l.entries.iter().map(|e| e.size).sum::<u64>().max(1), Ordering::Relaxed);
+    p.done.store(0, Ordering::Relaxed);
+    swap(archive, p, &[to.clone()], &[from.to_string()], |tmp| match l.kind {
+        Kind::Zip => {
+            let mut old = zip::ZipArchive::new(BufReader::new(File::open(archive).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+            let mut z = zip::ZipWriter::new(std::io::BufWriter::new(File::create_new(tmp).map_err(|e| e.to_string())?));
+            for i in 0..old.len() {
+                if p.cancelled() {
+                    return Err(CANCELLED.into());
+                }
+                let e = old.by_index_raw(i).map_err(|e| e.to_string())?;
+                let size = e.size();
+                let name = e.name().to_string();
+                let dir_slash = if name.ends_with('/') { "/" } else { "" };
+                match clean_path(&name).and_then(|n| moved(&n)) {
+                    Some(new) => z.raw_copy_file_rename(e, format!("{new}{dir_slash}")),
+                    None => z.raw_copy_file(e),
+                }
+                .map_err(|e| e.to_string())?;
+                p.add(size);
+            }
+            create::zip_finish(z)
+        }
+        Kind::Tar(c) => {
+            let mut b = create::tar_builder(create::open_enc(tmp, c, Level::Normal)?, p);
+            let mut old = tar::Archive::new(super::crates::decoder(archive, c)?);
+            for e in old.entries().map_err(|e| e.to_string())? {
+                if p.cancelled() {
+                    return Err(CANCELLED.into());
+                }
+                let mut e = e.map_err(|e| e.to_string())?;
+                let raw = String::from_utf8_lossy(&e.path_bytes()).to_string();
+                let Some(rel) = clean_path(&raw) else { continue };
+                let path = moved(&rel).unwrap_or(rel.clone());
+                let mut h = e.header().clone();
+                let kind = h.entry_type();
+                let r = if kind.is_symlink() || kind.is_hard_link() {
+                    let target = e.link_name().map_err(|e| e.to_string())?.map(|t| t.to_string_lossy().to_string()).unwrap_or_default();
+                    // hard links point at a path in the archive, which may have moved too
+                    let target = if kind.is_hard_link() { clean_path(&target).and_then(|t| moved(&t)).unwrap_or(target) } else { target };
+                    b.append_link(&mut h, &path, &target)
+                } else {
+                    b.append_data(&mut h, &path, &mut e)
+                };
+                r.map_err(|err| format!("{rel}: {}", create::io_err(err, p)))?;
+            }
+            create::tar_finish(b, p)
+        }
+        _ => {
+            fs::copy(archive, tmp).map_err(|e| e.to_string())?;
+            sevenz::rename(tmp, &[(from.to_string(), to.clone())])
+        }
+    })
+}
+
 /// Write the new archive with `write`, check it, then rename it over the old one.
 fn swap(archive: &Path, p: &Progress, must_have: &[String], must_not: &[String], write: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     let dir = archive.parent().ok_or("No folder")?;

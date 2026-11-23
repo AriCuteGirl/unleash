@@ -221,6 +221,10 @@ fn create_round_trips_every_format() {
         assert_eq!(again, d.join(format!("out (2){}", fmt.ext())));
     }
     assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("unleash-part")));
+    // our tar.zst has checksums
+    let z = d.join("out.tar.zst");
+    let r = check::test(&z, &list(&z).unwrap(), None, &Progress::default()).unwrap();
+    assert_eq!(r.weak, None);
 }
 
 #[test]
@@ -346,4 +350,67 @@ fn passwords_for_zip_and_7z() {
         assert_eq!(fs::read_dir(&out).unwrap().count(), 2, "{n}: leftovers after the failed tries");
         assert!(modify::can_modify(&l).is_err(), "{n}");
     }
+}
+
+#[test]
+fn test_finds_damage() {
+    let d = tmp("check");
+    let src = tree(&d);
+    // incompressible data, so a damaged byte hits file data and not just padding
+    fs::write(src.join("proj/src/deep/x.txt"), (0..200_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect::<Vec<u8>>()).unwrap();
+    for name in ["c.zip", "c.tar.gz", "c.tar.zst", "c.tar.xz", "c.7z"] {
+        let Some(arc) = make(&d, &src, name) else { continue };
+        let l = list(&arc).unwrap();
+        let r = check::test(&arc, &l, None, &Progress::default()).unwrap();
+        assert_eq!((r.files_ok, r.bad.len()), (4, 0), "{name}");
+        if r.weak.is_some() {
+            continue; // no checksums to find damage with (bsdtar's tar.zst): nothing to prove
+        }
+        // damage the middle of the archive
+        let mut bytes = fs::read(&arc).unwrap();
+        let mid = bytes.len() / 2;
+        for b in &mut bytes[mid..mid + 64] {
+            *b ^= 0x5a;
+        }
+        let bad = d.join(format!("bad-{name}"));
+        fs::write(&bad, bytes).unwrap();
+        // either the listing already fails, or the test reports something broken
+        match list(&bad) {
+            Err(_) => {}
+            Ok(l) => match check::test(&bad, &l, None, &Progress::default()) {
+                Ok(r) => assert!(!r.bad.is_empty(), "{name}: damage not found: {r:?}"),
+                Err(_) => {}
+            },
+        }
+    }
+}
+
+#[test]
+fn rename_files_and_folders() {
+    let d = tmp("rename");
+    let src = tree(&d);
+    for name in ["r.zip", "r.tar", "r.tar.zst", "r.7z"] {
+        let Some(arc) = make(&d, &src, name) else { continue };
+        let l = list(&arc).unwrap();
+        modify::rename(&arc, &l, "proj/src", "code", &Progress::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let l = list(&arc).unwrap();
+        modify::rename(&arc, &l, "loose.txt", "notes.txt", &Progress::default()).unwrap();
+        let l = list(&arc).unwrap();
+        assert_eq!(paths(&l), ["notes.txt", "proj/code/deep/x.txt", "proj/code/main.rs", "proj/readme.md"], "{name}");
+        // clashes and bad names are refused, the archive untouched
+        let before = fs::read(&arc).unwrap();
+        assert!(modify::rename(&arc, &l, "notes.txt", "proj", &Progress::default()).is_err());
+        assert!(modify::rename(&arc, &l, "notes.txt", "a/b", &Progress::default()).is_err());
+        assert_eq!(fs::read(&arc).unwrap(), before);
+        let out = d.join(format!("x-{name}"));
+        fs::create_dir(&out).unwrap();
+        extract_to(&arc, &l, &[], "", &out, Placement::Loose, &Progress::default()).unwrap();
+        assert_eq!(fs::read_to_string(out.join("proj/code/main.rs")).unwrap(), "fn main(){}", "{name}");
+    }
+}
+
+#[test]
+fn parses_7z_test_errors() {
+    let t = "ERROR: CRC Failed : d/a.bin\nERROR: Data Error : d/sub b/c.txt\nSub items Errors: 2\n";
+    assert_eq!(sevenz::parse_test_errors(t), vec![("d/a.bin".into(), "CRC Failed".into()), ("d/sub b/c.txt".into(), "Data Error".into())]);
 }

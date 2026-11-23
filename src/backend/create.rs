@@ -292,7 +292,12 @@ pub(super) fn open_enc(out: &Path, comp: super::Comp, level: Level) -> Result<En
         super::Comp::None => Enc::Plain(f),
         super::Comp::Gz => Enc::Gz(flate2::write::GzEncoder::new(f, flate2::Compression::new(pick(1, 6, 9)))),
         super::Comp::Xz => Enc::Xz(liblzma::write::XzEncoder::new(f, pick(1, 6, 9))),
-        super::Comp::Zst => Enc::Zst(zstd::stream::write::Encoder::new(f, pick(1, 6, 15) as i32).map_err(|e| e.to_string())?),
+        super::Comp::Zst => {
+            let mut e = zstd::stream::write::Encoder::new(f, pick(1, 6, 15) as i32).map_err(|e| e.to_string())?;
+            // a checksum, so Test can find damage
+            e.include_checksum(true).map_err(|e| e.to_string())?;
+            Enc::Zst(e)
+        }
     })
 }
 
