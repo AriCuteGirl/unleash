@@ -140,9 +140,10 @@ mod imp {
     impl ContentProviderImpl for LazyFiles {
         fn formats(&self) -> gdk::ContentFormats {
             // the same mime types GTK offers for real files (uri-list + portal), plus plain text
+            // (the portal types are only there when the file transfer portal is running)
             gdk::ContentFormats::for_type(gdk::FileList::static_type())
                 .union_serialize_mime_types()
-                .union(&gdk::ContentFormats::new(&["text/plain;charset=utf-8", "text/plain"]))
+                .union(&gdk::ContentFormats::new(&["text/uri-list", "text/plain;charset=utf-8", "text/plain"]))
         }
 
         fn write_mime_type_future(
@@ -163,8 +164,7 @@ mod imp {
                 }
                 // real files now: GTK's own serializers do uri-list and the portal
                 let list = gdk::FileList::from_array(&files.iter().map(gio::File::for_path).collect::<Vec<_>>());
-                let inner = gdk::ContentProvider::for_value(&list.to_value());
-                inner.write_mime_type_future(&mime, &stream, prio).await
+                gdk::content_serialize_future(&stream, &mime, &list.to_value(), prio).await
             })
         }
 
@@ -188,5 +188,50 @@ impl LazyFiles {
         let o: LazyFiles = glib::Object::new();
         *o.imp().pending.borrow_mut() = Some(p);
         o
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(p: &LazyFiles, mime: &str) -> String {
+        let out = gio::MemoryOutputStream::new_resizable();
+        let s: gio::OutputStream = out.clone().upcast();
+        glib::MainContext::default().block_on(p.write_mime_type_future(mime, &s, glib::Priority::DEFAULT)).unwrap();
+        let _ = s.close(gio::Cancellable::NONE);
+        String::from_utf8(out.steal_as_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn offers_uri_list_portal_and_text_and_waits_for_files() {
+        if gtk::init().is_err() {
+            return; // no display to test with
+        }
+        let d = std::env::temp_dir().join(format!("unleash-drag-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("a b.txt");
+        std::fs::write(&f, "x").unwrap();
+        let p = LazyFiles::new(Pending::ready(vec![f.clone()]));
+        let mimes: Vec<String> = p.formats().mime_types().iter().map(|m| m.to_string()).collect();
+        eprintln!("offered: {mimes:?}");
+        assert!(mimes.iter().any(|m| m == "text/uri-list"));
+        assert!(mimes.iter().any(|m| m.starts_with("text/plain")));
+        let uri = read(&p, "text/uri-list");
+        assert!(uri.starts_with("file://") && uri.contains("a%20b.txt"), "{uri}");
+        if std::env::var_os("UNLEASH_TEST_PORTAL").is_some() {
+            eprintln!("portal key: {:?}", read(&p, "application/vnd.portal.filetransfer"));
+        }
+        assert_eq!(read(&p, "text/plain;charset=utf-8"), format!("{}\n", f.display()));
+
+        // not ready yet: the read waits until the files are there
+        let pending = Rc::new(Pending { progress: Arc::default(), result: RefCell::new(None) });
+        let lazy = LazyFiles::new(pending.clone());
+        let pw = pending.clone();
+        let f2 = f.clone();
+        glib::timeout_add_local_once(Duration::from_millis(150), move || *pw.result.borrow_mut() = Some(Ok(vec![f2])));
+        let t = std::time::Instant::now();
+        assert!(read(&lazy, "text/uri-list").contains("a%20b.txt"));
+        assert!(t.elapsed() >= Duration::from_millis(140));
     }
 }
