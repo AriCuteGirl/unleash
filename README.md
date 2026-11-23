@@ -4,6 +4,9 @@ An archive manager for Linux in the spirit of 7-Zip that looks like your Hyprlan
 corners, shadows and folder icons come from the active hypr-rice, and it changes live when you
 switch. Dragging files out of an archive works on Wayland too.
 
+![Unleash in Lucid Blocks](docs/screenshots/lucid-blocks.jpg)
+![Unleash in Gravity Falls](docs/screenshots/gravity-falls.jpg)
+
 Rust and plain GTK4 (no libadwaita). Made to go with [Burrow](https://github.com/AriCuteGirl/burrow).
 
 ## What it does

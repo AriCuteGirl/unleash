@@ -18,7 +18,7 @@ fi
 rm -rf "dist/$NAME" "dist/$NAME.tar.gz"
 mkdir -p "dist/$NAME"
 cp target/dist/release/unleash install.sh README.md CHANGELOG.md LICENSE "dist/$NAME/"
-cp -r data "dist/$NAME/"
+cp -r data docs "dist/$NAME/"
 # licences of the libraries built into the binary
 OUT="dist/$NAME/THIRD-PARTY-LICENSES.txt"
 echo "Unleash includes these Rust libraries, under the licences below." > "$OUT"
