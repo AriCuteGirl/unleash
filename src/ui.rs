@@ -836,8 +836,12 @@ impl Win {
     /// The same icon the list shows: a rice-coloured folder, or the file type's icon.
     fn node_icon(&self, n: &crate::tree::Node) -> gio::Icon {
         if n.is_dir {
+            // GTK searches a child theme fully before its parents, so ["folder-carmine", "folder"]
+            // would give Papirus-Catppuccin's plain (violet) folder: pick the name ourselves, like Burrow
             let c = theme::papirus_folder_color(&self.tokens.borrow());
-            return gio::ThemedIcon::from_names(&[&format!("folder-{c}"), "folder"]).upcast();
+            let tinted = format!("folder-{c}");
+            let has = gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(&tinted));
+            return gio::ThemedIcon::new(if has { &tinted } else { "folder" }).upcast();
         }
         gio::content_type_get_icon(&gio::content_type_guess(Some(&n.name), None).0)
     }
