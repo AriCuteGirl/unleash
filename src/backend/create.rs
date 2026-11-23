@@ -163,8 +163,13 @@ fn zip(files: &[(PathBuf, String, fs::Metadata)], out: &Path, level: Level, p: &
             z.add_symlink(rel, target.to_string_lossy(), o).map_err(e)?;
         } else if md.is_file() {
             // already-compressed files are stored: deflate would only cost time
-            let method = if is_compressed(rel) { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
-            let o = o.compression_method(method).compression_level(Some(lvl)).large_file(md.len() >= 0xFFFF_FFFF);
+            // (a level is only valid for deflate: stored files must not get one)
+            let o = if is_compressed(rel) {
+                o.compression_method(zip::CompressionMethod::Stored)
+            } else {
+                o.compression_method(zip::CompressionMethod::Deflated).compression_level(Some(lvl))
+            };
+            let o = o.large_file(md.len() >= 0xFFFF_FFFF);
             z.start_file(rel, o).map_err(e)?;
             let mut r = File::open(path).map_err(|e| format!("{rel}: {e}"))?;
             copy_counted(&mut r, &mut z, p).map_err(|e| format!("{rel}: {e}"))?;

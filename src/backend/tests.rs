@@ -194,6 +194,8 @@ fn create_round_trips_every_format() {
     let d = tmp("create");
     let src = tree(&d);
     std::os::unix::fs::symlink("readme.md", src.join("proj/link.md")).unwrap();
+    // already-compressed files are stored, not deflated (zip)
+    fs::write(src.join("proj/photo.jpg"), vec![7u8; 5000]).unwrap();
     let items = [src.join("proj"), src.join("loose.txt")];
     for fmt in Format::ALL {
         if fmt == Format::SevenZ && !have("7z") {
@@ -204,7 +206,11 @@ fn create_round_trips_every_format() {
         assert_eq!(arc, d.join(format!("out{}", fmt.ext())), "{fmt:?}");
         assert!(p.fraction() > 0.99, "{fmt:?}: {}", p.fraction());
         let l = list(&arc).unwrap();
-        assert_eq!(paths(&l), ["loose.txt", "proj/link.md", "proj/readme.md", "proj/src/deep/x.txt", "proj/src/main.rs"], "{fmt:?}");
+        assert_eq!(paths(&l), ["loose.txt", "proj/link.md", "proj/photo.jpg", "proj/readme.md", "proj/src/deep/x.txt", "proj/src/main.rs"], "{fmt:?}");
+        if fmt == Format::Zip {
+            let jpg = l.entries.iter().find(|e| e.path == "proj/photo.jpg").unwrap();
+            assert_eq!((jpg.method.as_str(), jpg.packed), ("Stored", Some(5000)));
+        }
         let out = d.join(format!("x-{}", fmt.ext().trim_start_matches('.')));
         fs::create_dir(&out).unwrap();
         extract_to(&arc, &l, &[], "", &out, Placement::Loose, &Progress::default()).unwrap();

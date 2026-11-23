@@ -136,6 +136,12 @@ pub fn run(app: &gtk::Application, job: Job) {
             Err(e) if e == backend::CANCELLED => window.close(),
             Err(e) => {
                 root.add_css_class("error");
+                // the whole reason, wrapped (a middle "…" could hide the important part)
+                detail.set_ellipsize(gtk::pango::EllipsizeMode::None);
+                detail.set_wrap(true);
+                detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                detail.set_max_width_chars(48);
+                detail.set_selectable(true);
                 title.set_text(&title.text().replacen("Extracting", "Couldn't extract", 1).replacen("Compressing", "Couldn't compress", 1));
                 detail.set_text(&e);
                 bar.set_visible(false);
