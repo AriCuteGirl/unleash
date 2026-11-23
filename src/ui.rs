@@ -41,6 +41,10 @@ pub struct Win {
     state_icon: gtk::Image,
     job: JobBar,
     job_busy: Cell<bool>,
+    /// files opened in their apps, watched for saves (dropped when another archive opens)
+    edit_watch: RefCell<Vec<gio::FileMonitor>>,
+    keep_watches: Cell<bool>,
+    ctx_menu: gtk::PopoverMenu,
     extract_btns: Vec<gtk::Widget>,
 }
 
@@ -286,6 +290,27 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) -> Rc<Win> {
         state_icon,
         job,
         job_busy: Cell::new(false),
+        edit_watch: RefCell::new(vec![]),
+        keep_watches: Cell::new(false),
+        ctx_menu: {
+            let m = gio::Menu::new();
+            let a = gio::Menu::new();
+            a.append(Some("Open"), Some("win.open-selected"));
+            a.append(Some("Extract to…"), Some("win.extract-to"));
+            a.append(Some("Extract here"), Some("win.extract-here"));
+            m.append_section(None, &a);
+            let b = gio::Menu::new();
+            b.append(Some("Rename…"), Some("win.rename"));
+            b.append(Some("Delete"), Some("win.delete"));
+            m.append_section(None, &b);
+            let c = gio::Menu::new();
+            c.append(Some("Test archive"), Some("win.test"));
+            m.append_section(None, &c);
+            let pm = gtk::PopoverMenu::from_model(Some(&m));
+            pm.set_has_arrow(false);
+            pm.set_halign(gtk::Align::Start);
+            pm
+        },
         extract_btns: vec![sep.upcast(), here.upcast(), to.upcast(), add_btn.upcast(), del_btn.upcast()],
     });
     let weak = Rc::downgrade(&w);
@@ -295,6 +320,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) -> Rc<Win> {
             w.refresh_list();
         }
     });
+    w.ctx_menu.set_parent(&w.view);
     w.build_columns();
     w.build_actions(&menu_btn);
     w.build_drop(&root);
@@ -344,6 +370,9 @@ impl Win {
         add("new", |w| w.pick_files_to_pack());
         add("add", |w| w.pick_files_to_add());
         add("delete", |w| w.delete_selected());
+        add("rename", |w| w.rename_selected());
+        add("test", |w| w.test_archive());
+        add("open-selected", |w| w.open_selected());
         add("close", |w| w.window.close());
 
         // Colours: follow the rice, or keep one
@@ -375,6 +404,8 @@ impl Win {
         app.set_accels_for_action("win.extract-here", &["<Control><Shift>e"]);
         app.set_accels_for_action("win.up", &["<Alt>Up"]);
         app.set_accels_for_action("win.new", &["<Control>n"]);
+        app.set_accels_for_action("win.rename", &["F2"]);
+        app.set_accels_for_action("win.test", &["<Control>t"]);
         app.set_accels_for_action("win.close", &["<Control>w", "<Control>q"]);
 
         // Backspace goes up, unless something takes text
@@ -409,6 +440,9 @@ impl Win {
             }
             menu.append_submenu(Some("Colours"), &colors);
             let misc = gio::Menu::new();
+            if w.arc.borrow().is_some() {
+                misc.append(Some("Test archive"), Some("win.test"));
+            }
             misc.append(Some("Close"), Some("win.close"));
             menu.append_section(None, &misc);
             mb.set_menu_model(Some(&menu));
@@ -428,7 +462,15 @@ impl Win {
         let why_not = self.arc.borrow().as_ref().map(|a| modify::can_modify(&a.listing));
         let can = matches!(why_not, Some(Ok(()))) && !self.job_busy.get();
         let has_sel = !self.sel.selection().is_empty();
-        for (name, on) in [("add", can), ("delete", can && has_sel), ("new", !self.job_busy.get())] {
+        let one = self.selected_nodes().len() == 1;
+        for (name, on) in [
+            ("add", can),
+            ("delete", can && has_sel),
+            ("rename", can && one),
+            ("new", !self.job_busy.get()),
+            ("test", open && !self.job_busy.get()),
+            ("open-selected", open && has_sel),
+        ] {
             if let Some(a) = self.window.lookup_action(name).and_downcast::<gio::SimpleAction>() {
                 a.set_enabled(on);
             }
@@ -519,6 +561,9 @@ impl Win {
             }
             w.cache.borrow().values().for_each(|p| p.cancel());
             w.cache.borrow_mut().clear();
+            if !w.keep_watches.replace(false) {
+                w.edit_watch.borrow_mut().clear();
+            }
             match r {
                 Ok(o) => {
                     let type_name = o.listing.type_name.clone();
@@ -834,6 +879,156 @@ impl Win {
                 false
             });
             child.add_controller(src);
+
+            // right click: select the row (unless it's already part of the selection), show the menu
+            let rc = gtk::GestureClick::new();
+            rc.set_button(gdk::BUTTON_SECONDARY);
+            let (cw, ww) = (cell.downgrade(), weak.clone());
+            rc.connect_pressed(move |g, _, x, y| {
+                let (Some(w), Some(cell)) = (ww.upgrade(), cw.upgrade()) else { return };
+                g.set_state(gtk::EventSequenceState::Claimed);
+                if !cell.is_selected() {
+                    w.sel.select_item(cell.position(), true);
+                }
+                let Some(widget) = g.widget() else { return };
+                if let Some(pt) = widget.compute_point(&w.view, &gtk::graphene::Point::new(x as f32, y as f32)) {
+                    w.ctx_menu.set_pointing_to(Some(&gdk::Rectangle::new(pt.x() as i32, pt.y() as i32, 1, 1)));
+                }
+                w.update_actions();
+                w.ctx_menu.popup();
+            });
+            child.add_controller(rc);
+        });
+    }
+
+    /// Enter the selected folder, or open the first selected file in its app.
+    fn open_selected(self: &Rc<Self>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let Some(&i) = self.selected_nodes().first() else { return };
+        if arc.tree.nodes[i].is_dir {
+            self.enter(i);
+        } else {
+            self.open_in_app(i);
+        }
+    }
+
+    fn rename_selected(self: &Rc<Self>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let sel = self.selected_nodes();
+        let [i] = sel[..] else { return };
+        if let Err(e) = modify::can_modify(&arc.listing) {
+            self.job_error("Can't rename in this archive", &e);
+            return;
+        }
+        let (from, name, is_dir) = (arc.tree.nodes[i].path.clone(), arc.tree.nodes[i].name.clone(), arc.tree.nodes[i].is_dir);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            let Some(new) = crate::report::ask_name(w.window.upcast_ref(), &name, is_dir).await else { return };
+            let a2 = arc.clone();
+            w.run_job(
+                format!("Renaming {name}"),
+                format!("Couldn't rename {name}"),
+                move |p| modify::rename(&a2.path, &a2.listing, &from, &new, p),
+                move |w, ()| {
+                    w.job_hide();
+                    w.reopen();
+                },
+            );
+        });
+    }
+
+    fn test_archive(self: &Rc<Self>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let name = file_name(&arc.path);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            let pw = match w.unlock(&arc, &[]).await {
+                Ok(pw) => pw,
+                Err(e) if e == backend::CANCELLED => return,
+                Err(e) => return w.job_error(&format!("Couldn't test {name}"), &e),
+            };
+            let n2 = name.clone();
+            w.run_job(
+                format!("Testing {name}"),
+                format!("Couldn't test {name}"),
+                move |p| backend::check::test(&arc.path, &arc.listing, pw.as_deref(), p),
+                move |w, report| {
+                    w.job_hide();
+                    crate::report::show_test(w.window.upcast_ref(), &n2, &report);
+                },
+            );
+        });
+    }
+
+    /// After a file from the archive was opened in its app: when it's saved there, offer to put
+    /// it back. Editors often save by writing a new file and renaming it over the old one, so
+    /// the folder is watched, not the file.
+    fn watch_for_edits(self: &Rc<Self>, arc: &Arc<Opened>, entry: String, file: PathBuf) {
+        if modify::can_modify(&arc.listing).is_err() {
+            return;
+        }
+        let (Some(dir), Some(fname)) = (file.parent(), file.file_name().map(|n| n.to_os_string())) else { return };
+        let Ok(m) = gio::File::for_path(dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
+        let stamp = |f: &Path| std::fs::metadata(f).and_then(|m| m.modified()).ok();
+        let last = Rc::new(RefCell::new(stamp(&file)));
+        let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+        let (weak, arc_path) = (Rc::downgrade(self), arc.path.clone());
+        m.connect_changed(move |_, f, other, ev| {
+            use gio::FileMonitorEvent as E;
+            let hit = |x: Option<&gio::File>| x.and_then(|x| x.basename()).is_some_and(|b| b.as_os_str() == fname);
+            let ours = match ev {
+                E::ChangesDoneHint | E::Created | E::Changed => hit(Some(f)),
+                E::MovedIn | E::Renamed => hit(other) || hit(Some(f)),
+                _ => false,
+            };
+            if !ours {
+                return;
+            }
+            // wait until the app has finished writing
+            if let Some(id) = pending.borrow_mut().take() {
+                id.remove();
+            }
+            let (weak, file, entry, last, arc_path, pend) = (weak.clone(), file.clone(), entry.clone(), last.clone(), arc_path.clone(), pending.clone());
+            let id = glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                *pend.borrow_mut() = None;
+                let now = stamp(&file);
+                if now.is_none() || *last.borrow() == now {
+                    return;
+                }
+                *last.borrow_mut() = now;
+                let Some(w) = weak.upgrade() else { return };
+                // only while that archive is still the open one
+                if w.arc.borrow().as_ref().map(|a| a.path.clone()) != Some(arc_path.clone()) {
+                    return;
+                }
+                w.offer_update(entry.clone(), file.clone());
+            });
+            *pending.borrow_mut() = Some(id);
+        });
+        self.edit_watch.borrow_mut().push(m);
+    }
+
+    fn offer_update(self: &Rc<Self>, entry: String, file: PathBuf) {
+        let name = entry.rsplit('/').next().unwrap_or(&entry).to_string();
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let what = file_name(&arc.path);
+        let weak = Rc::downgrade(self);
+        self.job_ask(&format!("{name} was changed"), &format!("Put the new version into {what}?"), "Update", move || {
+            let Some(w) = weak.upgrade() else { return };
+            let Some(arc) = w.arc.borrow().clone() else { return };
+            let base = entry.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_default();
+            let (file, a2, name2, what2) = (file.clone(), arc.clone(), name.clone(), what.clone());
+            w.run_job(
+                format!("Updating {name}"),
+                format!("Couldn't update {name}"),
+                move |p| modify::add(&a2.path, &a2.listing, std::slice::from_ref(&file), &base, p),
+                move |w, ()| {
+                    w.job_note(&format!("Updated {name2}"), &format!("in {what2}"));
+                    w.reopen_keeping_watches();
+                },
+            );
         });
     }
 
@@ -922,10 +1117,12 @@ impl Win {
                 Err(e) if e == backend::CANCELLED => return,
                 Err(e) => return w.job_error(&format!("Couldn't open {name}"), &e),
             }
+            let path2 = path.clone();
             let p = w.extract_cached(&arc, vec![path]);
             w.watch_pending(&p, 1, &name);
             let Ok(files) = p.wait().await else { return };
             let Some(f) = files.first() else { return };
+            w.watch_for_edits(&arc, path2.clone(), f.clone());
             let l = gtk::FileLauncher::new(Some(&gio::File::for_path(f)));
             if let Err(e) = l.launch_future(Some(&w.window)).await {
                 if !e.matches(gtk::DialogError::Dismissed) && !e.matches(gtk::DialogError::Cancelled) {
@@ -1191,6 +1388,12 @@ impl Win {
         self.open_archive_at(arc.path.clone(), Some(here));
     }
 
+    /// Re-read after putting an edited file back: its app still has it open, keep watching.
+    fn reopen_keeping_watches(self: &Rc<Self>) {
+        self.keep_watches.set(true);
+        self.reopen();
+    }
+
     fn pick_files_to_add(self: &Rc<Self>) {
         let d = gtk::FileDialog::builder().title("Add to the archive").modal(true).accept_label("Add").build();
         let weak = Rc::downgrade(self);
@@ -1264,6 +1467,7 @@ impl Win {
         j.cancel.set_visible(false);
         j.close.set_visible(true);
         j.open.set_visible(true);
+        j.open.set_label("Show");
         let first = made.first().cloned();
         let weak = Rc::downgrade(self);
         set_handler(&j.open, move |_| {
@@ -1288,6 +1492,25 @@ impl Win {
         j.cancel.set_visible(false);
         j.open.set_visible(false);
         j.close.set_visible(true);
+        j.revealer.set_reveal_child(true);
+    }
+
+    /// A question in the job strip: `label` runs `f`, the × dismisses it.
+    pub fn job_ask(self: &Rc<Self>, title: &str, detail: &str, label: &str, f: impl Fn() + 'static) {
+        if self.job_busy.get() {
+            return;
+        }
+        let j = &self.job;
+        j.root.remove_css_class("error");
+        j.root.remove_css_class("done");
+        j.title.set_text(title);
+        j.detail.set_text(detail);
+        j.bar.set_visible(false);
+        j.cancel.set_visible(false);
+        j.close.set_visible(true);
+        j.open.set_label(label);
+        j.open.set_visible(true);
+        set_handler(&j.open, move |_| f());
         j.revealer.set_reveal_child(true);
     }
 

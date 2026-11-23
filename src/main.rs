@@ -8,6 +8,7 @@ mod jobwin;
 mod keyring;
 mod looks;
 mod password;
+mod report;
 #[allow(dead_code)]
 mod theme;
 mod tree;
