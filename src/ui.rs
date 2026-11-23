@@ -83,7 +83,11 @@ fn tool_button(icon: &str, text: &str, tip: &str) -> gtk::Button {
 pub fn open_window(app: &gtk::Application, file: Option<gio::File>) -> Rc<Win> {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("Unleash")
+        // an archive's name from the start: window rules can tell archive windows apart
+        .title(match file.as_ref().and_then(|f| f.basename()) {
+            Some(n) => format!("{} — Unleash", n.to_string_lossy()),
+            None => "Unleash".to_string(),
+        })
         .icon_name(crate::APP_ID)
         .default_width(980)
         .default_height(640)
