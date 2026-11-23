@@ -32,6 +32,18 @@ pub struct Opened {
     pub path: PathBuf,
     pub listing: Listing,
     pub tree: crate::tree::Tree,
+    /// once known (asked, or from the keyring) for as long as the archive is open
+    pub password: std::sync::Mutex<Option<String>>,
+}
+
+impl Opened {
+    pub fn new(path: PathBuf, listing: Listing, password: Option<String>) -> Opened {
+        let tree = crate::tree::Tree::build(&listing.entries);
+        Opened { path, listing, tree, password: std::sync::Mutex::new(password) }
+    }
+    pub fn password(&self) -> Option<String> {
+        self.password.lock().ok().and_then(|p| p.clone())
+    }
 }
 
 /// Files being extracted for a drag (or for opening in an app).
@@ -76,7 +88,8 @@ pub fn start(arc: Arc<Opened>, sel: Vec<String>) -> Rc<Pending> {
             let root = drag_root();
             std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
             let dir = backend::temp_dir_in(&root, "drag")?;
-            let res = backend::extract_raw(&arc.path, &arc.listing, &sel, &dir, &prog).and_then(|()| {
+            let pw = arc.password();
+            let res = backend::extract_raw_pw(&arc.path, &arc.listing, &sel, &dir, &prog, pw.as_deref()).and_then(|()| {
                 let files: Vec<PathBuf> = sel.iter().map(|s| dir.join(s)).collect();
                 match files.iter().find(|f| f.symlink_metadata().is_err()) {
                     Some(f) => Err(format!("{} wasn't extracted", f.display())),

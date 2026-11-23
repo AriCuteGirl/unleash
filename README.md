@@ -9,6 +9,9 @@ Rust + GTK4, no libadwaita.
 - Extract everything or just the selection, with progress and Cancel. Nothing is ever
   overwritten: results get free names ("notes (2).txt"), and a cancelled extract leaves nothing
 - **Drag files out** into file managers, browsers, chat apps and editors (also on Wayland, see below)
+- Passwords: opens locked zip, 7z and rar; makes locked zip (AES-256) and 7z (file names hidden
+  too). It asks in its own dialog, and can remember a password in your keyring (Secret Service,
+  through `secret-tool`); passwords are never put on a command line or in a file
 - Double-click a file to open it in its app
 - Make new archives (New, Ctrl+N, or drop files on an empty window): zip, 7z, tar.gz, tar.xz,
   tar.zst, with a compression level

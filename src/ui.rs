@@ -486,14 +486,33 @@ impl Win {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let p2 = path.clone();
-            let r = gio::spawn_blocking(move || {
-                backend::list(&p2).map(|listing| {
-                    let tree = crate::tree::Tree::build(&listing.entries);
-                    Opened { path: p2, listing, tree }
+            let mut r = gio::spawn_blocking(move || backend::list(&p2).map(|l| Opened::new(p2, l, None)))
+                .await
+                .unwrap_or_else(|_| Err("Reading the archive crashed".into()));
+            // names hidden behind a password (7z -mhe): find the password, then list again
+            if matches!(&r, Err(e) if e == backend::NEEDS_PASSWORD) {
+                let Some(w) = weak.upgrade() else { return };
+                let got: Rc<RefCell<Option<Opened>>> = Rc::default();
+                let (g2, p3) = (got.clone(), path.clone());
+                let res = crate::password::obtain(w.window.upcast_ref(), path.clone(), move |pw| {
+                    let (g2, p3) = (g2.clone(), p3.clone());
+                    async move {
+                        let pw2 = pw.clone();
+                        let o = gio::spawn_blocking(move || backend::list_pw(&p3, Some(&pw2)).map(|l| Opened::new(p3, l, Some(pw2.clone()))))
+                            .await
+                            .unwrap_or_else(|_| Err("crashed".into()))?;
+                        *g2.borrow_mut() = Some(o);
+                        Ok(())
+                    }
                 })
-            })
-            .await
-            .unwrap_or_else(|_| Err("Reading the archive crashed".into()));
+                .await;
+                r = match (res, got.borrow_mut().take()) {
+                    (Ok(_), Some(o)) => Ok(o),
+                    (Err(e), _) if e == backend::CANCELLED => Err("It's locked with a password. Open it again to type the password.".into()),
+                    (Err(e), _) => Err(e),
+                    (Ok(_), None) => Err("Couldn't read it".into()),
+                };
+            }
             let Some(w) = weak.upgrade() else { return };
             if w.loading.get() != n {
                 return; // another archive was opened meanwhile
@@ -759,6 +778,16 @@ impl Win {
                     w.sel.select_item(cell.position(), true);
                 }
                 let paths: Vec<String> = nodes.iter().map(|&i| arc.tree.nodes[i].path.clone()).collect();
+                // locked: a drag can't wait for a dialog, so ask now and let the user drag again
+                if backend::needs_password(&arc.listing, &paths) && arc.password().is_none() {
+                    let w2 = w.clone();
+                    glib::spawn_future_local(async move {
+                        if let Ok(Some(_)) = w2.unlock(&arc, &paths).await {
+                            w2.job_note("Unlocked", "Drag it again");
+                        }
+                    });
+                    return None;
+                }
                 let pending = w.extract_cached(&arc, paths);
                 let n = &arc.tree.nodes[here];
                 let icon = w.node_icon(n);
@@ -884,13 +913,18 @@ impl Win {
     /// Double-click on a file: extract to the cache, open with its default app.
     fn open_in_app(self: &Rc<Self>, i: usize) {
         let Some(arc) = self.arc.borrow().clone() else { return };
-        let n = &arc.tree.nodes[i];
-        let p = self.extract_cached(&arc, vec![n.path.clone()]);
-        self.watch_pending(&p, 1, &n.name.clone());
+        let (path, name) = (arc.tree.nodes[i].path.clone(), arc.tree.nodes[i].name.clone());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let Ok(files) = p.wait().await else { return };
             let Some(w) = weak.upgrade() else { return };
+            match w.unlock(&arc, std::slice::from_ref(&path)).await {
+                Ok(_) => {}
+                Err(e) if e == backend::CANCELLED => return,
+                Err(e) => return w.job_error(&format!("Couldn't open {name}"), &e),
+            }
+            let p = w.extract_cached(&arc, vec![path]);
+            w.watch_pending(&p, 1, &name);
+            let Ok(files) = p.wait().await else { return };
             let Some(f) = files.first() else { return };
             let l = gtk::FileLauncher::new(Some(&gio::File::for_path(f)));
             if let Err(e) = l.launch_future(Some(&w.window)).await {
@@ -999,13 +1033,43 @@ impl Win {
             (sel, base, how)
         };
         let name = file_name(&arc.path);
-        let d2 = dest.clone();
-        self.run_job(
-            format!("Extracting {name}"),
-            format!("Couldn't extract {name}"),
-            move |p| backend::extract_to(&arc.path, &arc.listing, &sel, &base, &d2, how, p),
-            move |w, made| w.job_done(&made, &dest),
-        );
+        let weak = Rc::downgrade(self);
+        let sel2 = sel.clone();
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            let pw = match w.unlock(&arc, &sel2).await {
+                Ok(pw) => pw,
+                Err(e) if e == backend::CANCELLED => return,
+                Err(e) => return w.job_error(&format!("Couldn't extract {name}"), &e),
+            };
+            let d2 = dest.clone();
+            w.run_job(
+                format!("Extracting {name}"),
+                format!("Couldn't extract {name}"),
+                move |p| backend::extract_to_pw(&arc.path, &arc.listing, &sel, &base, &d2, how, p, pw.as_deref()),
+                move |w, made| w.job_done(&made, &dest),
+            );
+        });
+    }
+
+    /// The password `sel` needs (None when it needs none): known, from the keyring, or asked.
+    pub async fn unlock(self: &Rc<Self>, arc: &Arc<Opened>, sel: &[String]) -> Result<Option<String>, String> {
+        if !backend::needs_password(&arc.listing, sel) {
+            return Ok(None);
+        }
+        if let Some(pw) = arc.password() {
+            return Ok(Some(pw));
+        }
+        let a2 = arc.clone();
+        let pw = crate::password::obtain(self.window.upcast_ref(), arc.path.clone(), move |pw| {
+            let a2 = a2.clone();
+            async move { gio::spawn_blocking(move || backend::check_password(&a2.path, &a2.listing, &pw)).await.unwrap_or_else(|_| Err("crashed".into())) }
+        })
+        .await?;
+        if let Ok(mut p) = arc.password.lock() {
+            *p = Some(pw.clone());
+        }
+        Ok(Some(pw))
     }
 
     /// Run `work` on a worker thread with the job strip showing its progress; `done` runs on
@@ -1220,6 +1284,35 @@ impl Win {
         j.root.add_css_class("error");
         j.title.set_text(title);
         j.detail.set_text(e);
+        j.bar.set_visible(false);
+        j.cancel.set_visible(false);
+        j.open.set_visible(false);
+        j.close.set_visible(true);
+        j.revealer.set_reveal_child(true);
+    }
+
+    /// A short note in the job strip that goes away by itself.
+    pub fn job_note(self: &Rc<Self>, title: &str, detail: &str) {
+        if self.job_busy.get() {
+            return;
+        }
+        self.job_done_text(title, detail);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(Duration::from_secs(3), move || {
+            if let Some(w) = weak.upgrade() {
+                if !w.job_busy.get() {
+                    w.job_hide();
+                }
+            }
+        });
+    }
+
+    fn job_done_text(&self, title: &str, detail: &str) {
+        let j = &self.job;
+        j.root.remove_css_class("error");
+        j.root.add_css_class("done");
+        j.title.set_text(title);
+        j.detail.set_text(detail);
         j.bar.set_visible(false);
         j.cancel.set_visible(false);
         j.open.set_visible(false);

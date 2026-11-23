@@ -235,10 +235,6 @@ pub fn selected(path: &str, sel: &[String]) -> bool {
 
 /// Extract `sel` (entry paths; empty = everything) of `archive` into the empty folder `into`,
 /// keeping the paths from the archive.
-pub fn extract_raw(archive: &Path, listing: &Listing, sel: &[String], into: &Path, p: &Progress) -> Result<(), String> {
-    extract_raw_pw(archive, listing, sel, into, p, None)
-}
-
 /// Does anything in `sel` (empty = everything) need a password?
 pub fn needs_password(listing: &Listing, sel: &[String]) -> bool {
     listing.entries.iter().any(|e| e.encrypted && selected(&e.path, sel))
@@ -334,6 +330,7 @@ pub enum Placement {
 
 /// Extract `sel` (all under `base`, the folder being browsed; "" = root) into `dest`.
 /// Returns what was created there.
+#[cfg(test)]
 pub fn extract_to(archive: &Path, listing: &Listing, sel: &[String], base: &str, dest: &Path, how: Placement, p: &Progress) -> Result<Vec<PathBuf>, String> {
     extract_to_pw(archive, listing, sel, base, dest, how, p, None)
 }

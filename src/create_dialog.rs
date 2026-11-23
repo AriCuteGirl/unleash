@@ -102,6 +102,36 @@ pub fn show(win: &Rc<Win>, files: Vec<PathBuf>) {
     where_btn.set_child(Some(&where_box));
     root.append(&field("Save in", &where_btn));
 
+    // password (zip and 7z only)
+    let pw_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let pw1 = gtk::PasswordEntry::new();
+    pw1.set_show_peek_icon(true);
+    pw1.add_css_class("path-entry");
+    pw1.set_property("placeholder-text", "No password");
+    let pw2 = gtk::PasswordEntry::new();
+    pw2.set_show_peek_icon(true);
+    pw2.add_css_class("path-entry");
+    pw2.set_property("placeholder-text", "Repeat it");
+    pw2.set_visible(false);
+    let pw_hint = gtk::Label::new(Some("zip keeps the file names readable; only their contents are locked (AES-256)"));
+    pw_hint.add_css_class("dialog-hint");
+    pw_hint.set_xalign(0.0);
+    pw_hint.set_wrap(true);
+    pw_hint.set_visible(false);
+    pw_box.append(&pw1);
+    pw_box.append(&pw2);
+    pw_box.append(&pw_hint);
+    let pw_field = field("Password", &pw_box);
+    root.append(&pw_field);
+    {
+        let (pw2, hint) = (pw2.clone(), pw_hint.clone());
+        pw1.connect_changed(move |e| {
+            let on = !e.text().is_empty();
+            pw2.set_visible(on);
+            hint.set_visible(on);
+        });
+    }
+
     let open_after = gtk::CheckButton::with_label("Open it when it's done");
     open_after.set_active(true);
     root.append(&open_after);
@@ -139,8 +169,18 @@ pub fn show(win: &Rc<Win>, files: Vec<PathBuf>) {
         });
     }
     {
-        let ext = ext.clone();
-        fmt.connect_selected_notify(move |d| ext.set_text(FORMATS[(d.selected() as usize).min(4)].0.ext()));
+        let (ext, pw_field, hint) = (ext.clone(), pw_field.clone(), pw_hint.clone());
+        fmt.connect_selected_notify(move |d| {
+            let f = FORMATS[(d.selected() as usize).min(4)].0;
+            ext.set_text(f.ext());
+            // tar can't be encrypted
+            pw_field.set_visible(create::can_encrypt(f));
+            hint.set_text(if f == Format::SevenZ {
+                "7z locks the file names too: nothing shows without the password"
+            } else {
+                "zip keeps the file names readable; only their contents are locked (AES-256)"
+            });
+        });
     }
     {
         let (dw, dest, label) = (dlg.downgrade(), dest.clone(), where_label.clone());
@@ -192,12 +232,14 @@ pub fn show(win: &Rc<Win>, files: Vec<PathBuf>) {
         } else {
             None
         };
+        let format = FORMATS[(fmt.selected() as usize).min(4)].0;
+        let pw = Some(pw1.text().to_string()).filter(|p| !p.is_empty() && create::can_encrypt(format));
+        let bad = bad.or_else(|| (pw.is_some() && pw1.text() != pw2.text()).then_some("The two passwords aren't the same"));
         if let Some(b) = bad {
             error.set_text(b);
             error.set_visible(true);
             return;
         }
-        let format = FORMATS[(fmt.selected() as usize).min(4)].0;
         let lvl = LEVELS[(level.selected() as usize).min(2)].0;
         let to = dest.borrow().clone();
         let files = files.clone();
@@ -207,7 +249,7 @@ pub fn show(win: &Rc<Win>, files: Vec<PathBuf>) {
         w.run_job(
             format!("Packing {full}"),
             format!("Couldn't pack {full}"),
-            move |p| create::create(&files, &to, &name, format, lvl, p),
+            move |p| create::create_pw(&files, &to, &name, format, lvl, p, pw.as_deref()),
             move |w, made| {
                 if open {
                     w.job_hide();

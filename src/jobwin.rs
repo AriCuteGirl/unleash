@@ -126,8 +126,8 @@ pub fn run(app: &gtk::Application, job: Job) {
 
     let w = window.downgrade();
     glib::spawn_future_local(async move {
-        let p = progress.clone();
-        let r: Result<Vec<PathBuf>, String> = gio::spawn_blocking(move || work(job, &p, &step)).await.unwrap_or_else(|_| Err("It crashed".into()));
+        let Some(win) = w.upgrade() else { return };
+        let r = work(win.upcast(), job, progress.clone(), step).await;
         ticker.remove();
         finished.set(true);
         let Some(window) = w.upgrade() else { return };
@@ -186,23 +186,69 @@ pub fn run(app: &gtk::Application, job: Job) {
     });
 }
 
-fn work(job: Job, p: &Progress, step: &std::sync::atomic::AtomicUsize) -> Result<Vec<PathBuf>, String> {
+/// Runs on the UI thread, doing the heavy parts on worker threads, so it can ask for passwords
+/// (keyring first) between steps.
+async fn work(win: gtk::Window, job: Job, p: Arc<Progress>, step: Arc<std::sync::atomic::AtomicUsize>) -> Result<Vec<PathBuf>, String> {
+    fn crashed<T>(_: Box<dyn std::any::Any + Send>) -> Result<T, String> {
+        Err("It crashed".into())
+    }
     match job {
         Job::Extract { to, archives } => {
             let mut made = vec![];
+            let many = archives.len() > 1;
+            let tag = |a: &Path, e: String| if many && e != backend::CANCELLED { format!("{}: {e}", name_of(a)) } else { e };
             for (k, a) in archives.iter().enumerate() {
                 step.store(k, Ordering::Relaxed);
                 p.set_current(&name_of(a));
-                let listing = backend::list(a).map_err(|e| format!("{}: {e}", name_of(a)))?;
+                let a2 = a.clone();
+                let mut listing = gio::spawn_blocking(move || backend::list(&a2)).await.unwrap_or_else(crashed);
+                let mut pw: Option<String> = None;
+                if matches!(&listing, Err(e) if e == backend::NEEDS_PASSWORD) {
+                    // names hidden: the password is needed to even list it
+                    let got = Rc::new(std::cell::RefCell::new(None));
+                    let (g2, a2) = (got.clone(), a.clone());
+                    let r = crate::password::obtain(&win, a.clone(), move |pw| {
+                        let (g2, a2) = (g2.clone(), a2.clone());
+                        async move {
+                            let l = gio::spawn_blocking(move || backend::list_pw(&a2, Some(&pw)).map(|l| (l, pw))).await.unwrap_or_else(|_| Err("crashed".into()))?;
+                            *g2.borrow_mut() = Some(l);
+                            Ok(())
+                        }
+                    })
+                    .await;
+                    listing = match (r, got.borrow_mut().take()) {
+                        (Ok(_), Some((l, p))) => {
+                            pw = Some(p);
+                            Ok(l)
+                        }
+                        (Err(e), _) => Err(e),
+                        (Ok(_), None) => Err("Couldn't read it".into()),
+                    };
+                }
+                let listing = Arc::new(listing.map_err(|e| tag(a, e))?);
+                if pw.is_none() && backend::needs_password(&listing, &[]) {
+                    let (l2, a2) = (listing.clone(), a.clone());
+                    pw = Some(
+                        crate::password::obtain(&win, a.clone(), move |pw| {
+                            let (l2, a2) = (l2.clone(), a2.clone());
+                            async move { gio::spawn_blocking(move || backend::check_password(&a2, &l2, &pw)).await.unwrap_or_else(|_| Err("crashed".into())) }
+                        })
+                        .await
+                        .map_err(|e| tag(a, e))?,
+                    );
+                }
                 let dest = to.clone().or_else(|| a.parent().map(Path::to_path_buf)).ok_or("No folder to extract into")?;
-                let r = backend::extract_to(a, &listing, &[], "", &dest, Placement::Smart, p);
+                let (a2, p2) = (a.clone(), p.clone());
+                let r = gio::spawn_blocking(move || backend::extract_to_pw(&a2, &listing, &[], "", &dest, Placement::Smart, &p2, pw.as_deref())).await.unwrap_or_else(crashed);
                 if p.cancelled() {
                     return Err(backend::CANCELLED.into());
                 }
-                made.extend(r.map_err(|e| if archives.len() == 1 { e } else { format!("{}: {e}", name_of(a)) })?);
+                made.extend(r.map_err(|e| tag(a, e))?);
             }
             Ok(made)
         }
-        Job::Add { format, name, to, level, files } => create::create(&files, &to, &name, format, level, p).map(|a| vec![a]),
+        Job::Add { format, name, to, level, files } => {
+            gio::spawn_blocking(move || create::create(&files, &to, &name, format, level, &p).map(|a| vec![a])).await.unwrap_or_else(crashed)
+        }
     }
 }

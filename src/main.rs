@@ -5,7 +5,9 @@ mod confirm;
 mod create_dialog;
 mod drag;
 mod jobwin;
+mod keyring;
 mod looks;
+mod password;
 #[allow(dead_code)]
 mod theme;
 mod tree;
