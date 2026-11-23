@@ -241,3 +241,57 @@ fn create_cancel_and_clashes_leave_nothing() {
     assert_eq!(create::Format::parse(".tar.zst"), Some(Format::TarZst));
     assert_eq!(create::Format::parse("7Z"), Some(Format::SevenZ));
 }
+
+#[test]
+fn add_replace_and_delete_inside_archives() {
+    let d = tmp("modify");
+    let src = tree(&d);
+    // things to add: a file, a folder, and a new loose.txt that replaces the old one
+    let newd = d.join("new");
+    fs::create_dir_all(newd.join("pics/inner")).unwrap();
+    fs::write(newd.join("added.txt"), "added").unwrap();
+    fs::write(newd.join("pics/inner/p.jpg"), vec![1u8; 3000]).unwrap();
+    fs::write(newd.join("loose.txt"), "NEW").unwrap();
+    for name in ["m.zip", "m.tar", "m.tar.gz", "m.tar.zst", "m.tar.xz", "m.7z"] {
+        let Some(arc) = make(&d, &src, name) else { continue };
+        let l = list(&arc).unwrap();
+        modify::can_modify(&l).unwrap();
+        let p = Progress::default();
+        // into a subfolder, and at the root replacing a file
+        modify::add(&arc, &l, &[newd.join("added.txt"), newd.join("pics")], "proj/src", &p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(p.fraction() > 0.99, "{name}: {}", p.fraction());
+        let l = list(&arc).unwrap();
+        assert_eq!(modify::clashes(&l, &[newd.join("loose.txt")], ""), ["loose.txt"]);
+        modify::add(&arc, &l, &[newd.join("loose.txt")], "", &Progress::default()).unwrap();
+        let l = list(&arc).unwrap();
+        modify::delete(&arc, &l, &["proj/src/deep".into(), "proj/readme.md".into()], &Progress::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let l = list(&arc).unwrap();
+        assert_eq!(paths(&l), ["loose.txt", "proj/src/added.txt", "proj/src/main.rs", "proj/src/pics/inner/p.jpg"], "{name}");
+        let out = d.join(format!("x-{name}"));
+        fs::create_dir(&out).unwrap();
+        extract_to(&arc, &l, &[], "", &out, Placement::Loose, &Progress::default()).unwrap();
+        assert_eq!(fs::read_to_string(out.join("loose.txt")).unwrap(), "NEW", "{name}");
+        assert_eq!(fs::read(out.join("proj/src/pics/inner/p.jpg")).unwrap().len(), 3000, "{name}");
+        assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("unleash-part")), "{name}: temp left");
+    }
+}
+
+#[test]
+fn failed_or_cancelled_changes_keep_the_original() {
+    let d = tmp("modify-safe");
+    let src = tree(&d);
+    let Some(arc) = make(&d, &src, "s.tar.zst") else { return };
+    let before = fs::read(&arc).unwrap();
+    let l = list(&arc).unwrap();
+    let p = Progress::default();
+    p.cancel.store(true, Ordering::Relaxed);
+    assert_eq!(modify::delete(&arc, &l, &["loose.txt".into()], &p).unwrap_err(), CANCELLED);
+    // a file that vanished before adding: error, original unchanged
+    assert!(modify::add(&arc, &l, &[d.join("nope.txt")], "", &Progress::default()).is_err());
+    assert_eq!(fs::read(&arc).unwrap(), before);
+    assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("unleash-part")));
+    // formats that can't be changed say so
+    if let Some(bz) = make(&d, &src, "s.tar.bz2") {
+        assert!(modify::can_modify(&list(&bz).unwrap()).is_err());
+    }
+}

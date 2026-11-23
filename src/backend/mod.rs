@@ -11,6 +11,7 @@
 
 pub mod create;
 mod crates;
+pub mod modify;
 mod sevenz;
 
 use std::collections::HashSet;

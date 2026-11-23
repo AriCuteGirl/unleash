@@ -102,6 +102,34 @@ pub fn create(dir: &Path, names: &[String], out: &Path, level: u32, p: &Progress
     run(cmd, p)
 }
 
+/// Add `names` (relative to `dir`) to an existing archive, keeping its format. `follow`: store
+/// what symlinks point to (used for staged links), else store links as links.
+pub fn update(dir: &Path, names: &[String], archive: &Path, follow: bool, p: &Progress) -> Result<(), String> {
+    let mut cmd = Command::new("7z");
+    cmd.arg("a").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::null()).current_dir(dir);
+    cmd.args(["-y", "-bso0", "-bse2", "-bsp1", "-bb0"]);
+    if !follow {
+        cmd.arg("-snl");
+    }
+    let archive = std::path::absolute(archive).map_err(|e| e.to_string())?;
+    cmd.arg("--").arg(archive).args(names);
+    run(cmd, p)
+}
+
+/// Delete entries (folders with their contents) from an archive.
+pub fn delete(archive: &Path, paths: &[String]) -> Result<(), String> {
+    let out = Command::new("7z")
+        .args(["d", "-sccUTF-8", "-y", "-bso0", "-bsp0", "-r-"])
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .arg("--")
+        .arg(archive)
+        .args(paths)
+        .output()
+        .map_err(|e| format!("Couldn't start 7z: {e}"))?;
+    if out.status.success() { Ok(()) } else { Err(err_text(&String::from_utf8_lossy(&out.stderr))) }
+}
+
 /// Run 7z, read its percentage into `p`, kill it on cancel.
 fn run(mut cmd: Command, p: &Progress) -> Result<(), String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

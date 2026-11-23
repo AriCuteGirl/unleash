@@ -51,7 +51,7 @@ pub enum Level {
 }
 
 /// Every file under `items` with its size (symlinks are stored as links, not followed).
-fn walk(items: &[PathBuf]) -> Result<Vec<(PathBuf, String, fs::Metadata)>, String> {
+pub(super) fn walk(items: &[PathBuf]) -> Result<Vec<(PathBuf, String, fs::Metadata)>, String> {
     let mut out = vec![];
     let mut stack: Vec<(PathBuf, String)> = vec![];
     for it in items.iter().rev() {
@@ -137,9 +137,21 @@ fn seven(items: &[PathBuf], out: &Path, level: Level, p: &Progress) -> Result<()
 }
 
 fn zip(files: &[(PathBuf, String, fs::Metadata)], out: &Path, level: Level, p: &Progress) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let f = File::create_new(out).map_err(|e| e.to_string())?;
     let mut z = zip::ZipWriter::new(BufWriter::new(f));
+    zip_entries(&mut z, files, level, p)?;
+    zip_finish(z)
+}
+
+pub(super) fn zip_finish(z: zip::ZipWriter<BufWriter<File>>) -> Result<(), String> {
+    let mut w = z.finish().map_err(|e| e.to_string())?;
+    w.flush().map_err(|e| e.to_string())?;
+    w.get_ref().sync_all().map_err(|e| e.to_string())
+}
+
+/// Write files (from `walk`) into a zip.
+pub(super) fn zip_entries<W: Write + std::io::Seek>(z: &mut zip::ZipWriter<W>, files: &[(PathBuf, String, fs::Metadata)], level: Level, p: &Progress) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
     let lvl = match level {
         Level::Fast => 1,
         Level::Normal => 6,
@@ -172,12 +184,10 @@ fn zip(files: &[(PathBuf, String, fs::Metadata)], out: &Path, level: Level, p: &
             let o = o.large_file(md.len() >= 0xFFFF_FFFF);
             z.start_file(rel, o).map_err(e)?;
             let mut r = File::open(path).map_err(|e| format!("{rel}: {e}"))?;
-            copy_counted(&mut r, &mut z, p).map_err(|e| format!("{rel}: {e}"))?;
+            copy_counted(&mut r, z, p).map_err(|e| format!("{rel}: {e}"))?;
         }
     }
-    let mut w = z.finish().map_err(|e| e.to_string())?;
-    w.flush().map_err(|e| e.to_string())?;
-    w.get_ref().sync_all().map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn zip_time(t: std::time::SystemTime) -> Option<zip::DateTime> {
@@ -196,8 +206,8 @@ fn is_compressed(name: &str) -> bool {
 }
 
 /// Counts what goes into the compressor and stops on cancel.
-struct Counted<'a, W: Write> {
-    w: W,
+pub(super) struct Counted<'a, W: Write> {
+    pub(super) w: W,
     p: &'a Progress,
 }
 impl<W: Write> Write for Counted<'_, W> {
@@ -214,7 +224,8 @@ impl<W: Write> Write for Counted<'_, W> {
     }
 }
 
-enum Enc {
+pub(super) enum Enc {
+    Plain(BufWriter<File>),
     Gz(flate2::write::GzEncoder<BufWriter<File>>),
     Xz(liblzma::write::XzEncoder<BufWriter<File>>),
     Zst(zstd::stream::write::Encoder<'static, BufWriter<File>>),
@@ -222,6 +233,7 @@ enum Enc {
 impl Write for Enc {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         match self {
+            Enc::Plain(e) => e.write(b),
             Enc::Gz(e) => e.write(b),
             Enc::Xz(e) => e.write(b),
             Enc::Zst(e) => e.write(b),
@@ -229,6 +241,7 @@ impl Write for Enc {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
+            Enc::Plain(e) => e.flush(),
             Enc::Gz(e) => e.flush(),
             Enc::Xz(e) => e.flush(),
             Enc::Zst(e) => e.flush(),
@@ -237,8 +250,9 @@ impl Write for Enc {
 }
 impl Enc {
     /// Write the compressor's tail and get the file back (errors here, e.g. disk full, count).
-    fn finish(self) -> std::io::Result<File> {
+    pub(super) fn finish(self) -> std::io::Result<File> {
         let w = match self {
+            Enc::Plain(w) => w,
             Enc::Gz(e) => e.finish()?,
             Enc::Xz(e) => e.finish()?,
             Enc::Zst(e) => e.finish()?,
@@ -247,30 +261,57 @@ impl Enc {
     }
 }
 
-fn tar(files: &[(PathBuf, String, fs::Metadata)], out: &Path, fmt: Format, level: Level, p: &Progress) -> Result<(), String> {
+/// A new file at `out` with the compressor for `comp`.
+pub(super) fn open_enc(out: &Path, comp: super::Comp, level: Level) -> Result<Enc, String> {
     let f = BufWriter::with_capacity(1 << 20, File::create_new(out).map_err(|e| e.to_string())?);
-    let err = |e: std::io::Error| if p.cancelled() { CANCELLED.to_string() } else { e.to_string() };
     let pick = |fast: u32, normal: u32, best: u32| match level {
         Level::Fast => fast,
         Level::Normal => normal,
         Level::Best => best,
     };
-    let enc = match fmt {
-        Format::TarGz => Enc::Gz(flate2::write::GzEncoder::new(f, flate2::Compression::new(pick(1, 6, 9)))),
-        Format::TarXz => Enc::Xz(liblzma::write::XzEncoder::new(f, pick(1, 6, 9))),
-        _ => Enc::Zst(zstd::stream::write::Encoder::new(f, pick(1, 6, 15) as i32).map_err(err)?),
-    };
-    // progress counts tar bytes (headers are tiny next to the data)
+    Ok(match comp {
+        super::Comp::None => Enc::Plain(f),
+        super::Comp::Gz => Enc::Gz(flate2::write::GzEncoder::new(f, flate2::Compression::new(pick(1, 6, 9)))),
+        super::Comp::Xz => Enc::Xz(liblzma::write::XzEncoder::new(f, pick(1, 6, 9))),
+        super::Comp::Zst => Enc::Zst(zstd::stream::write::Encoder::new(f, pick(1, 6, 15) as i32).map_err(|e| e.to_string())?),
+    })
+}
+
+/// Progress counts tar bytes (headers are tiny next to the data).
+pub(super) fn tar_builder(enc: Enc, p: &Progress) -> tar::Builder<Counted<'_, Enc>> {
     let mut b = tar::Builder::new(Counted { w: enc, p });
     b.follow_symlinks(false);
     b.mode(tar::HeaderMode::Complete);
+    b
+}
+
+pub(super) fn tar_entries<W: Write>(b: &mut tar::Builder<W>, files: &[(PathBuf, String, fs::Metadata)], p: &Progress) -> Result<(), String> {
     for (path, rel, _) in files {
         if p.cancelled() {
             return Err(CANCELLED.into());
         }
         p.set_current(rel);
-        b.append_path_with_name(path, rel).map_err(|e| format!("{rel}: {}", err(e)))?;
+        b.append_path_with_name(path, rel).map_err(|e| format!("{rel}: {}", io_err(e, p)))?;
     }
-    let c = b.into_inner().map_err(err)?;
-    c.w.finish().and_then(|f| f.sync_all()).map_err(err)
+    Ok(())
+}
+
+pub(super) fn tar_finish(b: tar::Builder<Counted<'_, Enc>>, p: &Progress) -> Result<(), String> {
+    let c = b.into_inner().map_err(|e| io_err(e, p))?;
+    c.w.finish().and_then(|f| f.sync_all()).map_err(|e| io_err(e, p))
+}
+
+pub(super) fn io_err(e: std::io::Error, p: &Progress) -> String {
+    if p.cancelled() { CANCELLED.to_string() } else { e.to_string() }
+}
+
+fn tar(files: &[(PathBuf, String, fs::Metadata)], out: &Path, fmt: Format, level: Level, p: &Progress) -> Result<(), String> {
+    let comp = match fmt {
+        Format::TarGz => super::Comp::Gz,
+        Format::TarXz => super::Comp::Xz,
+        _ => super::Comp::Zst,
+    };
+    let mut b = tar_builder(open_enc(out, comp, level)?, p);
+    tar_entries(&mut b, files, p)?;
+    tar_finish(b, p)
 }
