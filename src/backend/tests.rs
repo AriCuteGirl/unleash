@@ -187,3 +187,51 @@ fn parses_7z_technical_listing() {
     assert_eq!((e[1].size, e[1].packed, e[1].encrypted), (12, None, true));
     assert_eq!(e[1].modified, "2025-01-02 03:04");
 }
+
+#[test]
+fn create_round_trips_every_format() {
+    use create::{Format, Level};
+    let d = tmp("create");
+    let src = tree(&d);
+    std::os::unix::fs::symlink("readme.md", src.join("proj/link.md")).unwrap();
+    let items = [src.join("proj"), src.join("loose.txt")];
+    for fmt in Format::ALL {
+        if fmt == Format::SevenZ && !have("7z") {
+            continue;
+        }
+        let p = Progress::default();
+        let arc = create::create(&items, &d, "out", fmt, Level::Normal, &p).unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
+        assert_eq!(arc, d.join(format!("out{}", fmt.ext())), "{fmt:?}");
+        assert!(p.fraction() > 0.99, "{fmt:?}: {}", p.fraction());
+        let l = list(&arc).unwrap();
+        assert_eq!(paths(&l), ["loose.txt", "proj/link.md", "proj/readme.md", "proj/src/deep/x.txt", "proj/src/main.rs"], "{fmt:?}");
+        let out = d.join(format!("x-{}", fmt.ext().trim_start_matches('.')));
+        fs::create_dir(&out).unwrap();
+        extract_to(&arc, &l, &[], "", &out, Placement::Loose, &Progress::default()).unwrap();
+        assert_eq!(fs::read_to_string(out.join("proj/src/deep/x.txt")).unwrap().len(), 70_000, "{fmt:?}");
+        assert_eq!(fs::read_link(out.join("proj/link.md")).unwrap(), Path::new("readme.md"), "{fmt:?}");
+        // a second one gets a free name
+        let again = create::create(&items[1..], &d, "out", fmt, Level::Fast, &p).unwrap();
+        assert_eq!(again, d.join(format!("out (2){}", fmt.ext())));
+    }
+    assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("unleash-part")));
+}
+
+#[test]
+fn create_cancel_and_clashes_leave_nothing() {
+    use create::{Format, Level};
+    let d = tmp("create-cancel");
+    let src = tree(&d);
+    let p = Progress::default();
+    p.cancel.store(true, Ordering::Relaxed);
+    for fmt in [Format::Zip, Format::TarZst] {
+        assert_eq!(create::create(&[src.join("proj")], &d, "c", fmt, Level::Normal, &p).unwrap_err(), CANCELLED);
+    }
+    fs::create_dir_all(d.join("other")).unwrap();
+    fs::write(d.join("other/loose.txt"), "x").unwrap();
+    assert!(create::create(&[src.join("loose.txt"), d.join("other/loose.txt")], &d, "c", Format::Zip, Level::Normal, &Progress::default()).is_err());
+    let names: Vec<_> = fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(names.iter().all(|n| !n.starts_with('c') && !n.contains("unleash-part")), "{names:?}");
+    assert_eq!(create::Format::parse(".tar.zst"), Some(Format::TarZst));
+    assert_eq!(create::Format::parse("7Z"), Some(Format::SevenZ));
+}

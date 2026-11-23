@@ -9,6 +9,7 @@
 //! destination under free names, so nothing is ever overwritten and a cancelled or failed
 //! extract leaves nothing half-done behind.
 
+pub mod create;
 mod crates;
 mod sevenz;
 
@@ -253,6 +254,17 @@ pub fn temp_dir_in(dir: &Path, tag: &str) -> Result<PathBuf, String> {
         }
     }
     Err("No free temp name".into())
+}
+
+/// A hidden, unused file name in `dir` for writing `name<ext>` before the final rename.
+pub fn temp_name_in(dir: &Path, name: &str, ext: &str) -> PathBuf {
+    let base = format!(".{name}.unleash-part-{}", std::process::id());
+    let n = (0..).find(|n| fs_free(&dir.join(format!("{base}-{n}{ext}")))).unwrap_or(0);
+    dir.join(format!("{base}-{n}{ext}"))
+}
+
+fn fs_free(p: &Path) -> bool {
+    p.symlink_metadata().is_err()
 }
 
 fn free_in(dir: &Path, name: &str) -> PathBuf {

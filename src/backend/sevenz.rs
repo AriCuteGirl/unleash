@@ -91,6 +91,19 @@ pub fn extract(path: &Path, sel: &[String], into: &Path, p: &Progress) -> Result
     if !sel.is_empty() {
         cmd.arg("-r-"); // names are exact paths, not searched for in every folder
     }
+    run(cmd, p)
+}
+
+/// `7z a` of `names` (relative to `dir`) into `out`, with progress.
+pub fn create(dir: &Path, names: &[String], out: &Path, level: u32, p: &Progress) -> Result<(), String> {
+    // not base(): an empty -p on "a" would be read as a password
+    let mut cmd = Command::new("7z");
+    cmd.arg("a").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::null()).current_dir(dir).args(["-t7z", "-y", "-bso0", "-bse2", "-bsp1", "-bb0", "-snl"]).arg(format!("-mx={level}")).arg("--").arg(out).args(names);
+    run(cmd, p)
+}
+
+/// Run 7z, read its percentage into `p`, kill it on cancel.
+fn run(mut cmd: Command, p: &Progress) -> Result<(), String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start 7z: {e}"))?;
     let mut so = child.stdout.take().ok_or("no output")?;
