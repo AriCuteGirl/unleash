@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 /// Can this archive be changed? Err says why not, in words for the user.
 pub fn can_modify(l: &Listing) -> Result<(), String> {
     match l.kind {
+        _ if l.entries.iter().any(|e| e.encrypted) => Err("Archives with a password can't be changed yet".into()),
         Kind::Zip | Kind::Tar(_) => Ok(()),
         Kind::SevenZ if matches!(l.type_name.as_str(), "7z" | "zip") && have("7z") => Ok(()),
         Kind::SevenZ if l.entries.iter().any(|e| e.encrypted) => Err("Encrypted archives can't be changed yet".into()),
@@ -130,7 +131,7 @@ fn zip_rewrite(archive: &Path, tmp: &Path, drop: &[String], add: &[(PathBuf, Str
             p.add(size);
         }
     }
-    create::zip_entries(&mut z, add, Level::Normal, p)?;
+    create::zip_entries(&mut z, add, Level::Normal, p, None)?;
     create::zip_finish(z)
 }
 

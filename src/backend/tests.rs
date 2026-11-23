@@ -295,3 +295,55 @@ fn failed_or_cancelled_changes_keep_the_original() {
         assert!(modify::can_modify(&list(&bz).unwrap()).is_err());
     }
 }
+
+#[test]
+fn passwords_for_zip_and_7z() {
+    use create::{Format, Level};
+    let d = tmp("pw");
+    let src = tree(&d);
+    let items = [src.join("proj"), src.join("loose.txt")];
+    let mut arcs = vec![];
+    // ours: AES zip, 7z with hidden names
+    for fmt in [Format::Zip, Format::SevenZ] {
+        if fmt == Format::SevenZ && !have("7z") {
+            continue;
+        }
+        arcs.push(create::create_pw(&items, &d, "secret", fmt, Level::Fast, &Progress::default(), Some("hunter2")).unwrap());
+    }
+    assert!(create::create_pw(&items, &d, "nope", Format::TarGz, Level::Fast, &Progress::default(), Some("x")).is_err());
+    // made by 7-Zip: legacy ZipCrypto zip, 7z with readable names
+    if have("7z") {
+        for (name, extra) in [("zc.zip", "-tzip"), ("open.7z", "-mhe=off")] {
+            let out = d.join(name);
+            let mut c = Command::new("7z");
+            c.current_dir(&src).args(["a", "-bd", "-y", "-phunter2", extra]).arg(&out).args(["proj", "loose.txt"]);
+            run(&mut c);
+            arcs.push(out);
+        }
+    }
+    for arc in arcs {
+        let n = arc.file_name().unwrap().to_string_lossy().to_string();
+        let l = match list(&arc) {
+            Ok(l) => l,
+            Err(e) => {
+                // names hidden: listing itself needs the password
+                assert_eq!(e, NEEDS_PASSWORD, "{n}");
+                assert_eq!(list_pw(&arc, Some("wrong")).unwrap_err(), WRONG_PASSWORD, "{n}");
+                list_pw(&arc, Some("hunter2")).unwrap()
+            }
+        };
+        assert!(needs_password(&l, &[]), "{n}");
+        assert_eq!(paths(&l).len(), 4, "{n}");
+        let out = d.join(format!("x-{n}"));
+        fs::create_dir(&out).unwrap();
+        let p = Progress::default();
+        assert_eq!(extract_to(&arc, &l, &[], "", &out, Placement::Loose, &p).unwrap_err(), NEEDS_PASSWORD, "{n}");
+        assert_eq!(extract_to_pw(&arc, &l, &[], "", &out, Placement::Loose, &p, Some("wrong")).unwrap_err(), WRONG_PASSWORD, "{n}");
+        assert_eq!(check_password(&arc, &l, "wrong").unwrap_err(), WRONG_PASSWORD, "{n}");
+        check_password(&arc, &l, "hunter2").unwrap_or_else(|e| panic!("{n}: {e}"));
+        extract_to_pw(&arc, &l, &[], "", &out, Placement::Loose, &p, Some("hunter2")).unwrap_or_else(|e| panic!("{n}: {e}"));
+        assert_eq!(fs::read_to_string(out.join("proj/src/deep/x.txt")).unwrap().len(), 70_000, "{n}");
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 2, "{n}: leftovers after the failed tries");
+        assert!(modify::can_modify(&l).is_err(), "{n}");
+    }
+}

@@ -107,6 +107,9 @@ impl Progress {
 }
 
 pub const CANCELLED: &str = "Cancelled";
+/// Error texts the UI recognises: ask for a password (again).
+pub const NEEDS_PASSWORD: &str = "This archive needs a password";
+pub const WRONG_PASSWORD: &str = "Wrong password";
 
 pub fn detect(path: &Path) -> Result<Kind, String> {
     let mut head = [0u8; 512];
@@ -165,13 +168,18 @@ pub fn have(cmd: &str) -> bool {
 }
 
 pub fn list(path: &Path) -> Result<Listing, String> {
+    list_pw(path, None)
+}
+
+/// List, with a password for archives whose names are encrypted (7z with -mhe).
+pub fn list_pw(path: &Path, pw: Option<&str>) -> Result<Listing, String> {
     let kind = detect(path)?;
     let (kind, type_name, entries) = match kind {
         Kind::Zip => match crates::list_zip(path) {
             Ok(e) => (kind, kind.label().to_string(), e),
             // methods we don't build in (deflate64, bzip2, lzma, ...) or odd zips: 7z can do them
             Err(_) if have("7z") => {
-                let (t, e) = sevenz::list(path)?;
+                let (t, e) = sevenz::list(path, pw)?;
                 (Kind::SevenZ, t, e)
             }
             Err(e) => return Err(e),
@@ -183,7 +191,7 @@ pub fn list(path: &Path) -> Result<Listing, String> {
             if !have("7z") {
                 return Err("This format needs 7-Zip (the 7zip package)".into());
             }
-            let (t, e) = sevenz::list(path)?;
+            let (t, e) = sevenz::list(path, pw)?;
             (kind, t, e)
         }
     };
@@ -228,15 +236,35 @@ pub fn selected(path: &str, sel: &[String]) -> bool {
 /// Extract `sel` (entry paths; empty = everything) of `archive` into the empty folder `into`,
 /// keeping the paths from the archive.
 pub fn extract_raw(archive: &Path, listing: &Listing, sel: &[String], into: &Path, p: &Progress) -> Result<(), String> {
+    extract_raw_pw(archive, listing, sel, into, p, None)
+}
+
+/// Does anything in `sel` (empty = everything) need a password?
+pub fn needs_password(listing: &Listing, sel: &[String]) -> bool {
+    listing.entries.iter().any(|e| e.encrypted && selected(&e.path, sel))
+}
+
+/// Try `pw` on the smallest encrypted file (quick): Ok, WRONG_PASSWORD or another error.
+pub fn check_password(archive: &Path, listing: &Listing, pw: &str) -> Result<(), String> {
+    let Some(e) = listing.entries.iter().filter(|e| e.encrypted && !e.is_dir).min_by_key(|e| e.size) else { return Ok(()) };
+    let root = std::env::temp_dir().join(format!("unleash-pwcheck-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&root);
+    let dir = temp_dir_in(&root, "check")?;
+    let r = extract_raw_pw(archive, listing, std::slice::from_ref(&e.path), &dir, &Progress::default(), Some(pw));
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+pub fn extract_raw_pw(archive: &Path, listing: &Listing, sel: &[String], into: &Path, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     let total: u64 = listing.entries.iter().filter(|e| !e.is_dir && selected(&e.path, sel)).map(|e| e.size).sum();
     p.total.store(total.max(1), Ordering::Relaxed);
     p.done.store(0, Ordering::Relaxed);
     let r = match listing.kind {
-        Kind::Zip => crates::extract_zip(archive, sel, into, p),
+        Kind::Zip => crates::extract_zip(archive, sel, into, p, pw),
         Kind::Tar(c) => crates::extract_tar(crates::decoder(archive, c)?, sel, into, p),
         Kind::BsdTar => crates::extract_tar(crates::bsdtar_stream(archive)?, sel, into, p),
         Kind::Single(c) => crates::extract_single(archive, c, &listing.entries[0].path, into, p),
-        Kind::SevenZ => sevenz::extract(archive, sel, into, p),
+        Kind::SevenZ => sevenz::extract(archive, sel, into, p, pw),
     };
     if p.cancelled() {
         return Err(CANCELLED.into());
@@ -307,8 +335,16 @@ pub enum Placement {
 /// Extract `sel` (all under `base`, the folder being browsed; "" = root) into `dest`.
 /// Returns what was created there.
 pub fn extract_to(archive: &Path, listing: &Listing, sel: &[String], base: &str, dest: &Path, how: Placement, p: &Progress) -> Result<Vec<PathBuf>, String> {
+    extract_to_pw(archive, listing, sel, base, dest, how, p, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn extract_to_pw(archive: &Path, listing: &Listing, sel: &[String], base: &str, dest: &Path, how: Placement, p: &Progress, pw: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    if pw.is_none() && needs_password(listing, sel) {
+        return Err(NEEDS_PASSWORD.into());
+    }
     let tmp = temp_dir_in(dest, "extract")?;
-    let res = extract_raw(archive, listing, sel, &tmp, p).and_then(|()| {
+    let res = extract_raw_pw(archive, listing, sel, &tmp, p, pw).and_then(|()| {
         let name = archive.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         place(&tmp, base, dest, how, &stem(&name))
     });

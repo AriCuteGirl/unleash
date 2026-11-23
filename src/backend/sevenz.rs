@@ -1,6 +1,6 @@
 //! Everything else through the `7z` program (7zip package): 7z, rar, iso, cab, wim, dmg, ...
 
-use super::{CANCELLED, Entry, Progress};
+use super::{CANCELLED, Entry, NEEDS_PASSWORD, Progress, WRONG_PASSWORD};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,17 +9,33 @@ use std::time::Duration;
 
 fn base(cmd: &str) -> Command {
     let mut c = Command::new("7z");
-    // -p with an empty value: an encrypted archive fails at once instead of waiting on stdin
-    // (password support comes with the keyring milestone). -sccUTF-8: UTF-8 names in output.
-    c.arg(cmd).arg("-p").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::null());
+    // the password goes in on stdin when 7z asks (never on the command line, where other
+    // programs could read it); with none, stdin is closed and 7z stops at once.
+    // -sccUTF-8: UTF-8 names in the output
+    c.arg(cmd).arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::piped());
     c
 }
 
+/// Answer 7z's password question(s) and close stdin.
+fn feed(child: &mut std::process::Child, pw: Option<&str>, times: usize) {
+    if let Some(mut si) = child.stdin.take() {
+        if let Some(pw) = pw {
+            use std::io::Write;
+            for _ in 0..times {
+                let _ = writeln!(si, "{pw}");
+            }
+        }
+    }
+}
+
 /// Last useful line of 7z's error output.
-fn err_text(s: &str) -> String {
+fn err_text(s: &str, had_pw: bool) -> String {
     let s = s.trim();
-    if s.contains("Wrong password") || s.contains("encrypted") {
-        return "This archive needs a password (coming in a later version)".into();
+    if s.contains("Wrong password") || (s.contains("encrypted") && had_pw) {
+        return WRONG_PASSWORD.into();
+    }
+    if s.contains("Break signaled") || s.contains("encrypted") || s.contains("Enter password") {
+        return if had_pw { WRONG_PASSWORD.into() } else { NEEDS_PASSWORD.into() };
     }
     s.lines()
         .map(str::trim)
@@ -31,14 +47,16 @@ fn err_text(s: &str) -> String {
         .to_string()
 }
 
-pub fn list(path: &Path) -> Result<(String, Vec<Entry>), String> {
-    let out = base("l").arg("-slt").arg("--").arg(path).output().map_err(|e| format!("Couldn't start 7z: {e}"))?;
+pub fn list(path: &Path, pw: Option<&str>) -> Result<(String, Vec<Entry>), String> {
+    let mut child = base("l").arg("-slt").arg("--").arg(path).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start 7z: {e}"))?;
+    feed(&mut child, pw, 1);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
+    if !out.status.success() || text.contains("Break signaled") {
         let mut all = String::from_utf8_lossy(&out.stderr).to_string();
         all.push('\n');
         all.push_str(&text);
-        return Err(err_text(&all));
+        return Err(err_text(&all, pw.is_some()));
     }
     Ok(parse_slt(&text))
 }
@@ -81,7 +99,7 @@ pub fn parse_slt(text: &str) -> (String, Vec<Entry>) {
 }
 
 /// `7z x` into `into`, with progress from its percentage output.
-pub fn extract(path: &Path, sel: &[String], into: &Path, p: &Progress) -> Result<(), String> {
+pub fn extract(path: &Path, sel: &[String], into: &Path, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     let mut cmd = base("x");
     cmd.args(["-y", "-bso0", "-bse2", "-bsp1", "-bb0"]).arg(format!("-o{}", into.display())).arg("--").arg(path);
     // whole folders are picked by name; 7z includes what's inside them
@@ -91,29 +109,32 @@ pub fn extract(path: &Path, sel: &[String], into: &Path, p: &Progress) -> Result
     if !sel.is_empty() {
         cmd.arg("-r-"); // names are exact paths, not searched for in every folder
     }
-    run(cmd, p)
+    run(cmd, p, pw, 1)
 }
 
 /// `7z a` of `names` (relative to `dir`) into `out`, with progress.
-pub fn create(dir: &Path, names: &[String], out: &Path, level: u32, p: &Progress) -> Result<(), String> {
-    // not base(): an empty -p on "a" would be read as a password
-    let mut cmd = Command::new("7z");
-    cmd.arg("a").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::null()).current_dir(dir).args(["-t7z", "-y", "-bso0", "-bse2", "-bsp1", "-bb0", "-snl"]).arg(format!("-mx={level}")).arg("--").arg(out).args(names);
-    run(cmd, p)
+/// With a password the file names are encrypted too (-mhe), so nothing shows without it.
+pub fn create(dir: &Path, names: &[String], out: &Path, level: u32, p: &Progress, pw: Option<&str>) -> Result<(), String> {
+    let mut cmd = base("a");
+    if pw.is_some() {
+        cmd.args(["-p", "-mhe=on"]); // -p alone: 7z asks (twice) on stdin
+    }
+    cmd.current_dir(dir).args(["-t7z", "-y", "-bso0", "-bse2", "-bsp1", "-bb0", "-snl"]).arg(format!("-mx={level}")).arg("--").arg(out).args(names);
+    run(cmd, p, pw, 2)
 }
 
 /// Add `names` (relative to `dir`) to an existing archive, keeping its format. `follow`: store
 /// what symlinks point to (used for staged links), else store links as links.
 pub fn update(dir: &Path, names: &[String], archive: &Path, follow: bool, p: &Progress) -> Result<(), String> {
     let mut cmd = Command::new("7z");
-    cmd.arg("a").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::null()).current_dir(dir);
+    cmd.arg("a").arg("-sccUTF-8").env("LC_ALL", "C.UTF-8").stdin(Stdio::piped()).current_dir(dir);
     cmd.args(["-y", "-bso0", "-bse2", "-bsp1", "-bb0"]);
     if !follow {
         cmd.arg("-snl");
     }
     let archive = std::path::absolute(archive).map_err(|e| e.to_string())?;
     cmd.arg("--").arg(archive).args(names);
-    run(cmd, p)
+    run(cmd, p, None, 0)
 }
 
 /// Delete entries (folders with their contents) from an archive.
@@ -127,13 +148,14 @@ pub fn delete(archive: &Path, paths: &[String]) -> Result<(), String> {
         .args(paths)
         .output()
         .map_err(|e| format!("Couldn't start 7z: {e}"))?;
-    if out.status.success() { Ok(()) } else { Err(err_text(&String::from_utf8_lossy(&out.stderr))) }
+    if out.status.success() { Ok(()) } else { Err(err_text(&String::from_utf8_lossy(&out.stderr), false)) }
 }
 
 /// Run 7z, read its percentage into `p`, kill it on cancel.
-fn run(mut cmd: Command, p: &Progress) -> Result<(), String> {
+fn run(mut cmd: Command, p: &Progress, pw: Option<&str>, asks: usize) -> Result<(), String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start 7z: {e}"))?;
+    feed(&mut child, pw, asks);
     let mut so = child.stdout.take().ok_or("no output")?;
     let mut se = child.stderr.take();
     let errs = std::thread::spawn(move || {
@@ -185,7 +207,7 @@ fn run(mut cmd: Command, p: &Progress) -> Result<(), String> {
         p.done.store(total, Ordering::Relaxed);
         Ok(())
     } else {
-        Err(err_text(&msg))
+        Err(err_text(&msg, pw.is_some()))
     }
 }
 

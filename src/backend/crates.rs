@@ -1,6 +1,6 @@
 //! zip and the tar family, in process.
 
-use super::{CANCELLED, Comp, Entry, Progress, clean_path, copy_counted, local_time, selected};
+use super::{CANCELLED, Comp, NEEDS_PASSWORD, WRONG_PASSWORD, Entry, Progress, clean_path, copy_counted, local_time, selected};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path};
@@ -75,21 +75,32 @@ pub fn list_zip(path: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-pub fn extract_zip(path: &Path, sel: &[String], into: &Path, p: &Progress) -> Result<(), String> {
+pub fn extract_zip(path: &Path, sel: &[String], into: &Path, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     let f = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
     let mut z = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
     for i in 0..z.len() {
         if p.cancelled() {
             return Err(CANCELLED.into());
         }
-        let mut e = z.by_index(i).map_err(|e| match e {
-            zip::result::ZipError::UnsupportedArchive(m) if m.contains("assword") => "This archive needs a password (coming in a later version)".to_string(),
-            e => e.to_string(),
-        })?;
-        let Some(rel) = clean_path(e.name()) else { continue };
+        // check the name first (raw: no decryption needed) so unselected entries are skipped
+        let (rel, encrypted) = {
+            let raw = z.by_index_raw(i).map_err(|e| e.to_string())?;
+            (clean_path(raw.name()), raw.encrypted())
+        };
+        let Some(rel) = rel else { continue };
         if !selected(&rel, sel) {
             continue;
         }
+        let got = match (encrypted, pw) {
+            (true, None) => return Err(NEEDS_PASSWORD.into()),
+            (true, Some(pw)) => z.by_index_decrypt(i, pw.as_bytes()),
+            (false, _) => z.by_index(i),
+        };
+        let mut e = got.map_err(|e| match e {
+            zip::result::ZipError::InvalidPassword => WRONG_PASSWORD.to_string(),
+            zip::result::ZipError::UnsupportedArchive(m) if m.contains("assword") => NEEDS_PASSWORD.to_string(),
+            e => e.to_string(),
+        })?;
         let out = into.join(&rel);
         p.set_current(&rel);
         if e.is_dir() {
@@ -106,7 +117,8 @@ pub fn extract_zip(path: &Path, sel: &[String], into: &Path, p: &Progress) -> Re
             continue;
         }
         let mut w = File::create_new(&out).map_err(|e| format!("{rel}: {e}"))?;
-        copy_counted(&mut e, &mut w, p).map_err(|e| format!("{rel}: {e}"))?;
+        // ZipCrypto's quick check lets some wrong passwords through; the CRC at the end catches them
+        copy_counted(&mut e, &mut w, p).map_err(|err| if encrypted && (err.contains("checksum") || err.contains("CRC") || err.contains("auth")) { WRONG_PASSWORD.to_string() } else { format!("{rel}: {err}") })?;
         drop(w);
         if let Some(mode) = e.unix_mode() {
             use std::os::unix::fs::PermissionsExt;

@@ -75,6 +75,21 @@ pub fn walk(items: &[PathBuf]) -> Result<Vec<(PathBuf, String, fs::Metadata)>, S
 
 /// Pack `items` into `<dest>/<name><ext>` (a free name). Returns the archive.
 pub fn create(items: &[PathBuf], dest: &Path, name: &str, fmt: Format, level: Level, p: &Progress) -> Result<PathBuf, String> {
+    create_pw(items, dest, name, fmt, level, p, None)
+}
+
+/// Can this format have a password?
+pub fn can_encrypt(fmt: Format) -> bool {
+    matches!(fmt, Format::Zip | Format::SevenZ)
+}
+
+/// `pw`: zip gets AES-256 per file (names stay readable, as zip can't hide them); 7z encrypts
+/// the names too.
+pub fn create_pw(items: &[PathBuf], dest: &Path, name: &str, fmt: Format, level: Level, p: &Progress, pw: Option<&str>) -> Result<PathBuf, String> {
+    let pw = pw.filter(|s| !s.is_empty());
+    if pw.is_some() && !can_encrypt(fmt) {
+        return Err("Only zip and 7z archives can have a password".into());
+    }
     if items.is_empty() {
         return Err("Nothing to compress".into());
     }
@@ -90,12 +105,12 @@ pub fn create(items: &[PathBuf], dest: &Path, name: &str, fmt: Format, level: Le
     let name = if name.trim().is_empty() { "archive" } else { name.trim() };
     let tmp = temp_name_in(dest, name, fmt.ext());
     let res = match fmt {
-        Format::Zip => zip(&files, &tmp, level, p),
+        Format::Zip => zip(&files, &tmp, level, p, pw),
         Format::SevenZ => {
             if !have("7z") {
                 Err("7z archives need 7-Zip (the 7zip package)".into())
             } else {
-                seven(items, &tmp, level, p)
+                seven(items, &tmp, level, p, pw)
             }
         }
         Format::TarGz | Format::TarXz | Format::TarZst => tar(&files, &tmp, fmt, level, p),
@@ -113,7 +128,7 @@ pub fn create(items: &[PathBuf], dest: &Path, name: &str, fmt: Format, level: Le
     res
 }
 
-fn seven(items: &[PathBuf], out: &Path, level: Level, p: &Progress) -> Result<(), String> {
+fn seven(items: &[PathBuf], out: &Path, level: Level, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     // 7z gets names relative to one folder; items from several folders go in one by one
     let lvl = match level {
         Level::Fast => 1,
@@ -131,15 +146,15 @@ fn seven(items: &[PathBuf], out: &Path, level: Level, p: &Progress) -> Result<()
     }
     let out = std::path::absolute(out).map_err(|e| e.to_string())?;
     for (dir, names) in by_dir {
-        sevenz::create(&dir, &names, &out, lvl, p)?;
+        sevenz::create(&dir, &names, &out, lvl, p, pw)?;
     }
     Ok(())
 }
 
-fn zip(files: &[(PathBuf, String, fs::Metadata)], out: &Path, level: Level, p: &Progress) -> Result<(), String> {
+fn zip(files: &[(PathBuf, String, fs::Metadata)], out: &Path, level: Level, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     let f = File::create_new(out).map_err(|e| e.to_string())?;
     let mut z = zip::ZipWriter::new(BufWriter::new(f));
-    zip_entries(&mut z, files, level, p)?;
+    zip_entries(&mut z, files, level, p, pw)?;
     zip_finish(z)
 }
 
@@ -150,7 +165,7 @@ pub(super) fn zip_finish(z: zip::ZipWriter<BufWriter<File>>) -> Result<(), Strin
 }
 
 /// Write files (from `walk`) into a zip.
-pub(super) fn zip_entries<W: Write + std::io::Seek>(z: &mut zip::ZipWriter<W>, files: &[(PathBuf, String, fs::Metadata)], level: Level, p: &Progress) -> Result<(), String> {
+pub(super) fn zip_entries<W: Write + std::io::Seek>(z: &mut zip::ZipWriter<W>, files: &[(PathBuf, String, fs::Metadata)], level: Level, p: &Progress, pw: Option<&str>) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let lvl = match level {
         Level::Fast => 1,
@@ -182,6 +197,10 @@ pub(super) fn zip_entries<W: Write + std::io::Seek>(z: &mut zip::ZipWriter<W>, f
                 o.compression_method(zip::CompressionMethod::Deflated).compression_level(Some(lvl))
             };
             let o = o.large_file(md.len() >= 0xFFFF_FFFF);
+            let o = match pw {
+                Some(pw) => o.with_aes_encryption(zip::AesMode::Aes256, pw),
+                None => o,
+            };
             z.start_file(rel, o).map_err(e)?;
             let mut r = File::open(path).map_err(|e| format!("{rel}: {e}"))?;
             copy_counted(&mut r, z, p).map_err(|e| format!("{rel}: {e}"))?;
