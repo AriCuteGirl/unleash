@@ -39,6 +39,7 @@ pub struct Win {
     state_title: gtk::Label,
     state_text: gtk::Label,
     state_icon: gtk::Image,
+    state_open: gtk::Button,
     job: JobBar,
     job_busy: Cell<bool>,
     /// files opened in their apps, watched for saves (dropped when another archive opens)
@@ -288,6 +289,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) -> Rc<Win> {
         state_title,
         state_text,
         state_icon,
+        state_open: open2.clone(),
         job,
         job_busy: Cell::new(false),
         edit_watch: RefCell::new(vec![]),
@@ -592,6 +594,8 @@ impl Win {
         self.state_title.set_text(title);
         self.state_text.set_text(text);
         self.state_text.set_visible(!text.is_empty());
+        // no "Open an archive…" while one is loading
+        self.state_open.set_visible(icon != "content-loading-symbolic");
         self.stack.set_visible_child_name("state");
         self.status.set_text("");
     }
