@@ -10,7 +10,23 @@ Rust + GTK4, no libadwaita.
   overwritten: results get free names ("notes (2).txt"), and a cancelled extract leaves nothing
 - **Drag files out** into file managers, browsers, chat apps and editors (also on Wayland, see below)
 - Double-click a file to open it in its app
+- Compress files and folders to zip, 7z, tar.gz, tar.xz or tar.zst (command line for now)
 - Follows the active rice live (colours, corners, shadows), or keep one rice's colours (menu → Colours)
+
+## Command line
+
+```
+unleash [ARCHIVE…]                 open archives
+unleash x [--to DIR] ARCHIVE…      extract each archive next to it (or into DIR)
+unleash a [OPTIONS] FILE…          compress files and folders into one archive
+    --format zip|7z|tar.gz|tar.xz|tar.zst   (default zip)
+    --name NAME   --to DIR   --level fast|normal|best
+```
+
+`x` and `a` show a small progress window and return at once (a running Unleash does the
+work). This is what Burrow's *Extract here* and *Compress…* call. Extracting is smart: one
+folder inside stays that folder, loose files get a folder named after the archive. Nothing is
+ever overwritten, and a cancelled job leaves nothing behind.
 
 ## How the format is read
 

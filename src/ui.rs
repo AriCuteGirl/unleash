@@ -2,9 +2,10 @@
 //! All reading and extracting happens on worker threads; the UI only polls progress.
 
 use crate::backend::{self, Placement, Progress};
-use crate::config::{self, Config};
+use crate::config;
+use crate::looks::{self, Looks};
 use crate::drag::{self, LazyFiles, Opened, Pending};
-use crate::theme::{self, RicePaths, Tokens};
+use crate::theme;
 use crate::util::{human_size, natural_cmp};
 use gtk::gdk;
 use gtk::gio;
@@ -20,14 +21,7 @@ use std::time::Duration;
 
 pub struct Win {
     pub window: gtk::ApplicationWindow,
-    provider: gtk::CssProvider,
-    paths: RicePaths,
-    cfg: RefCell<Config>,
-    tokens: RefCell<Tokens>,
-    /// resolved off the UI thread (settings.ini may be read)
-    icon_theme: RefCell<Option<String>>,
-    rice_monitors: RefCell<Vec<gio::FileMonitor>>,
-    debounce: RefCell<Option<glib::SourceId>>,
+    looks: Rc<Looks>,
 
     arc: RefCell<Option<Arc<Opened>>>,
     cwd: Cell<usize>,
@@ -82,15 +76,6 @@ fn tool_button(icon: &str, text: &str, tip: &str) -> gtk::Button {
 }
 
 pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
-    let paths = RicePaths::from_env();
-    let cfg = config::load();
-    let tokens = theme::load_choice(&paths, &cfg.appearance.colors);
-    let icon_theme = config::icon_theme(&cfg);
-    let provider = gtk::CssProvider::new();
-    if let Some(d) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(&d, &provider, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
-    }
-
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Unleash")
@@ -248,13 +233,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
 
     let w = Rc::new(Win {
         window: window.clone(),
-        provider,
-        paths,
-        cfg: RefCell::new(cfg),
-        tokens: RefCell::new(tokens),
-        icon_theme: RefCell::new(icon_theme),
-        rice_monitors: RefCell::new(vec![]),
-        debounce: RefCell::new(None),
+        looks: looks::get(),
         arc: RefCell::new(None),
         cwd: Cell::new(0),
         cache: RefCell::new(HashMap::new()),
@@ -273,8 +252,13 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
         job_busy: Cell::new(false),
         extract_btns: vec![here.upcast(), to.upcast()],
     });
-    w.apply_theme();
-    w.watch_rice();
+    let weak = Rc::downgrade(&w);
+    w.looks.on_change(move || {
+        if let Some(w) = weak.upgrade() {
+            w.sync_colors_action();
+            w.refresh_list();
+        }
+    });
     w.build_columns();
     w.build_actions(&menu_btn);
     w.build_drop(&root);
@@ -298,95 +282,9 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
 
 impl Win {
     // ------------------------------------------------------------------ theme
-    fn apply_theme(&self) {
-        let cfg = self.cfg.borrow();
-        if let (Some(t), Some(s)) = (self.icon_theme.borrow().clone(), gtk::Settings::default()) {
-            if s.gtk_icon_theme_name().as_deref() != Some(t.as_str()) {
-                s.set_gtk_icon_theme_name(Some(&t));
-            }
-        }
-        let a = theme::Appearance { font: cfg.appearance.font.clone(), opacity: cfg.appearance.opacity, ..Default::default() };
-        self.provider.load_from_string(&theme::css(&self.tokens.borrow(), &a));
-    }
-
-    fn watch_rice(self: &Rc<Self>) {
-        let mut files = vec![self.paths.current_file()];
-        let choice = self.cfg.borrow().appearance.colors.clone();
-        if let Some(id) = theme::pinned_id(&self.paths, &choice).or_else(|| theme::active_id(&self.paths)) {
-            if let Some(d) = theme::rice_dir(&self.paths, &id) {
-                files.push(d.join("rice.json"));
-                files.push(d.join("hypr/look.lua"));
-            }
-        }
-        files.push(self.paths.noctalia.clone());
-        files.push(config::path());
-        let mut mons = vec![];
-        for p in files {
-            let f = gio::File::for_path(&p);
-            let m = if p.is_dir() {
-                f.monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-            } else {
-                f.monitor_file(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
-            };
-            let Ok(m) = m else { continue };
-            let weak = Rc::downgrade(self);
-            m.connect_changed(move |_, _, _, ev| {
-                if matches!(ev, gio::FileMonitorEvent::AttributeChanged | gio::FileMonitorEvent::PreUnmount) {
-                    return;
-                }
-                if let Some(w) = weak.upgrade() {
-                    w.schedule_retheme();
-                }
-            });
-            mons.push(m);
-        }
-        *self.rice_monitors.borrow_mut() = mons;
-    }
-
-    fn schedule_retheme(self: &Rc<Self>) {
-        if let Some(id) = self.debounce.borrow_mut().take() {
-            id.remove();
-        }
-        let weak = Rc::downgrade(self);
-        let id = glib::timeout_add_local_once(Duration::from_millis(250), move || {
-            let Some(w) = weak.upgrade() else { return };
-            *w.debounce.borrow_mut() = None;
-            let paths = w.paths.clone();
-            let weak = Rc::downgrade(&w);
-            glib::spawn_future_local(async move {
-                let Ok((cfg, t, icons)) = gio::spawn_blocking(move || {
-                    let cfg = config::load();
-                    let t = theme::load_choice(&paths, &cfg.appearance.colors);
-                    let icons = config::icon_theme(&cfg);
-                    (cfg, t, icons)
-                })
-                .await
-                else {
-                    return;
-                };
-                let Some(w) = weak.upgrade() else { return };
-                let rewatch = w.tokens.borrow().rice_id != t.rice_id || w.cfg.borrow().appearance.colors != cfg.appearance.colors;
-                *w.icon_theme.borrow_mut() = icons;
-                if *w.tokens.borrow() != t || *w.cfg.borrow() != cfg {
-                    *w.tokens.borrow_mut() = t;
-                    *w.cfg.borrow_mut() = cfg;
-                    w.apply_theme();
-                    w.sync_colors_action();
-                    w.refresh_list();
-                }
-                if rewatch {
-                    w.watch_rice();
-                }
-            });
-        });
-        *self.debounce.borrow_mut() = Some(id);
-    }
-
     fn sync_colors_action(&self) {
         if let Some(a) = self.window.lookup_action("colors").and_downcast::<gio::SimpleAction>() {
-            let c = self.cfg.borrow().appearance.colors.clone();
-            let c = if theme::pinned_id(&self.paths, &c).is_some() { c } else { "rice".into() };
-            a.set_state(&c.to_variant());
+            a.set_state(&self.looks.colors_choice().to_variant());
         }
     }
 
@@ -409,14 +307,13 @@ impl Win {
         add("close", |w| w.window.close());
 
         // Colours: follow the rice, or keep one
-        let c = self.cfg.borrow().appearance.colors.clone();
-        let c = if theme::pinned_id(&self.paths, &c).is_some() { c } else { "rice".into() };
+        let c = self.looks.colors_choice();
         let colors = gio::SimpleAction::new_stateful("colors", Some(glib::VariantTy::STRING), &c.to_variant());
         let weak = Rc::downgrade(self);
         colors.connect_activate(move |a, v| {
             let (Some(w), Some(v)) = (weak.upgrade(), v.and_then(|v| v.get::<String>())) else { return };
             a.set_state(&v.to_variant());
-            let mut cfg = w.cfg.borrow().clone();
+            let mut cfg = w.looks.cfg.borrow().clone();
             cfg.appearance.colors = v;
             let weak = Rc::downgrade(&w);
             glib::spawn_future_local(async move {
@@ -426,7 +323,7 @@ impl Win {
                 }
                 // the config monitor re-themes; this covers a missing monitor
                 if let Some(w) = weak.upgrade() {
-                    w.schedule_retheme();
+                    w.looks.reload();
                 }
             });
         });
@@ -460,7 +357,7 @@ impl Win {
             let menu = gio::Menu::new();
             let colors = gio::Menu::new();
             colors.append(Some("Follow the rice"), Some("win.colors::rice"));
-            for (id, name) in theme::list_rices(&w.paths) {
+            for (id, name) in theme::list_rices(&w.looks.paths) {
                 let item = gio::MenuItem::new(Some(&name), None);
                 item.set_action_and_target_value(Some("win.colors"), Some(&id.to_variant()));
                 colors.append_item(&item);
@@ -838,7 +735,7 @@ impl Win {
         if n.is_dir {
             // GTK searches a child theme fully before its parents, so ["folder-carmine", "folder"]
             // would give Papirus-Catppuccin's plain (violet) folder: pick the name ourselves, like Burrow
-            let c = theme::papirus_folder_color(&self.tokens.borrow());
+            let c = theme::papirus_folder_color(&self.looks.tokens.borrow());
             let tinted = format!("folder-{c}");
             let has = gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(&tinted));
             return gio::ThemedIcon::new(if has { &tinted } else { "folder" }).upcast();

@@ -17,6 +17,7 @@ pub enum Format {
 }
 
 impl Format {
+    #[allow(dead_code)] // for the Create dialog
     pub const ALL: [Format; 5] = [Format::Zip, Format::SevenZ, Format::TarGz, Format::TarXz, Format::TarZst];
 
     pub fn ext(self) -> &'static str {
@@ -99,10 +100,9 @@ pub fn create(items: &[PathBuf], dest: &Path, name: &str, fmt: Format, level: Le
         }
         Format::TarGz | Format::TarXz | Format::TarZst => tar(&files, &tmp, fmt, level, p),
     };
+    // a cancel shows up as an error from whatever was writing; report it as just that
+    let res = if p.cancelled() { Err(CANCELLED.to_string()) } else { res };
     let res = res.and_then(|()| {
-        if p.cancelled() {
-            return Err(CANCELLED.to_string());
-        }
         let target = super::free_in(dest, &format!("{name}{}", fmt.ext()));
         fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
         Ok(target)
@@ -253,7 +253,7 @@ fn tar(files: &[(PathBuf, String, fs::Metadata)], out: &Path, fmt: Format, level
     let enc = match fmt {
         Format::TarGz => Enc::Gz(flate2::write::GzEncoder::new(f, flate2::Compression::new(pick(1, 6, 9)))),
         Format::TarXz => Enc::Xz(liblzma::write::XzEncoder::new(f, pick(1, 6, 9))),
-        _ => Enc::Zst(zstd::stream::write::Encoder::new(f, pick(1, 6, 19) as i32).map_err(err)?),
+        _ => Enc::Zst(zstd::stream::write::Encoder::new(f, pick(1, 6, 15) as i32).map_err(err)?),
     };
     // progress counts tar bytes (headers are tiny next to the data)
     let mut b = tar::Builder::new(Counted { w: enc, p });

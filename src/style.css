@@ -281,3 +281,11 @@ progressbar.job progress {
   padding: 0 5px;
   min-width: 10px;
 }
+
+/* progress window for `unleash x` / `unleash a` */
+.job-window { padding: 18px 20px 16px 20px; }
+.job-window .job-title { font-size: 15px; font-weight: 700; color: @text; }
+.job-window .job-detail { font-size: 12px; color: @text_faint; }
+.job-window.done .job-title { color: @success; }
+.job-window.error .job-title { color: @danger; }
+.job-window.error .job-detail { color: @text_dim; }
