@@ -1,7 +1,7 @@
 //! The window: toolbar, path bar inside the archive, file list, progress strip, status bar.
 //! All reading and extracting happens on worker threads; the UI only polls progress.
 
-use crate::backend::{self, Placement, Progress};
+use crate::backend::{self, Placement, Progress, modify};
 use crate::config;
 use crate::looks::{self, Looks};
 use crate::drag::{self, LazyFiles, Opened, Pending};
@@ -75,7 +75,7 @@ fn tool_button(icon: &str, text: &str, tip: &str) -> gtk::Button {
     b
 }
 
-pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
+pub fn open_window(app: &gtk::Application, file: Option<gio::File>) -> Rc<Win> {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Unleash")
@@ -103,8 +103,20 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
     here.set_action_name(Some("win.extract-here"));
     let to = tool_button("folder-download-symbolic", "Extract to…", "Pick a folder to extract into (Ctrl+E)");
     to.set_action_name(Some("win.extract-to"));
+    let new_btn = tool_button("document-new-symbolic", "New", "Make a new archive (Ctrl+N)");
+    new_btn.set_action_name(Some("win.new"));
+    toolbar.append(&new_btn);
+    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    sep.add_css_class("tool-sep");
+    toolbar.append(&sep);
     toolbar.append(&here);
     toolbar.append(&to);
+    let add_btn = tool_button("list-add-symbolic", "Add", "Add files into this folder of the archive (or drop them on the window)");
+    add_btn.set_action_name(Some("win.add"));
+    let del_btn = tool_button("edit-delete-symbolic", "Delete", "Delete the selected items from the archive (Delete)");
+    del_btn.set_action_name(Some("win.delete"));
+    toolbar.append(&add_btn);
+    toolbar.append(&del_btn);
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     toolbar.append(&spacer);
@@ -230,6 +242,30 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
     root.append(&statusbar);
 
     window.set_child(Some(&root));
+    // narrow (tiled next to other windows): icons only, except Extract here
+    {
+        let labelled: Vec<gtk::Widget> = [&open, &new_btn, &to, &add_btn, &del_btn].iter().map(|b| (*b).clone().upcast()).collect();
+        let name_w = name.clone();
+        let fit = move |w: &gtk::ApplicationWindow| {
+            let narrow = w.width() > 0 && w.width() < 820;
+            for b in &labelled {
+                if let Some(l) = b.first_child().and_then(|bx| bx.last_child()).and_downcast::<gtk::Label>() {
+                    l.set_visible(!narrow);
+                }
+            }
+            name_w.set_visible(w.width() == 0 || w.width() >= 560);
+        };
+        // GTK has no resize signal for toplevels; a light check that only acts on a change
+        let (ww, last) = (window.downgrade(), Cell::new(-1));
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            let Some(w) = ww.upgrade() else { return glib::ControlFlow::Break };
+            if w.width() != last.get() {
+                last.set(w.width());
+                fit(&w);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     let w = Rc::new(Win {
         window: window.clone(),
@@ -250,7 +286,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
         state_icon,
         job,
         job_busy: Cell::new(false),
-        extract_btns: vec![here.upcast(), to.upcast()],
+        extract_btns: vec![sep.upcast(), here.upcast(), to.upcast(), add_btn.upcast(), del_btn.upcast()],
     });
     let weak = Rc::downgrade(&w);
     w.looks.on_change(move || {
@@ -278,6 +314,7 @@ pub fn open_window(app: &gtk::Application, file: Option<gio::File>) {
     if let Some(f) = file.and_then(|f| f.path()) {
         w.open_archive(f);
     }
+    w
 }
 
 impl Win {
@@ -304,6 +341,9 @@ impl Win {
         add("extract-here", |w| w.extract_here());
         add("extract-to", |w| w.extract_to_dialog());
         add("up", |w| w.go_up());
+        add("new", |w| w.pick_files_to_pack());
+        add("add", |w| w.pick_files_to_add());
+        add("delete", |w| w.delete_selected());
         add("close", |w| w.window.close());
 
         // Colours: follow the rice, or keep one
@@ -334,6 +374,7 @@ impl Win {
         app.set_accels_for_action("win.extract-to", &["<Control>e"]);
         app.set_accels_for_action("win.extract-here", &["<Control><Shift>e"]);
         app.set_accels_for_action("win.up", &["<Alt>Up"]);
+        app.set_accels_for_action("win.new", &["<Control>n"]);
         app.set_accels_for_action("win.close", &["<Control>w", "<Control>q"]);
 
         // Backspace goes up, unless something takes text
@@ -343,6 +384,10 @@ impl Win {
             let Some(w) = weak.upgrade() else { return glib::Propagation::Proceed };
             if key == gdk::Key::BackSpace && mods.is_empty() {
                 w.go_up();
+                return glib::Propagation::Stop;
+            }
+            if key == gdk::Key::Delete && mods.is_empty() {
+                w.delete_selected();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -380,6 +425,29 @@ impl Win {
         if let Some(a) = self.window.lookup_action("up").and_downcast::<gio::SimpleAction>() {
             a.set_enabled(open && self.cwd.get() != 0);
         }
+        let why_not = self.arc.borrow().as_ref().map(|a| modify::can_modify(&a.listing));
+        let can = matches!(why_not, Some(Ok(()))) && !self.job_busy.get();
+        let has_sel = !self.sel.selection().is_empty();
+        for (name, on) in [("add", can), ("delete", can && has_sel), ("new", !self.job_busy.get())] {
+            if let Some(a) = self.window.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+                a.set_enabled(on);
+            }
+        }
+        // say why Add and Delete are off for rar, iso, ...
+        let tip = match &why_not {
+            Some(Err(e)) => Some(e.clone()),
+            _ => None,
+        };
+        for b in &self.extract_btns[3..] {
+            match &tip {
+                Some(t) => b.set_tooltip_text(Some(t)),
+                None => b.set_tooltip_text(Some(if b == &self.extract_btns[3] {
+                    "Add files into this folder of the archive (or drop them on the window)"
+                } else {
+                    "Delete the selected items from the archive (Delete)"
+                })),
+            }
+        }
         for b in &self.extract_btns {
             b.set_visible(open);
         }
@@ -403,10 +471,17 @@ impl Win {
     }
 
     pub fn open_archive(self: &Rc<Self>, path: PathBuf) {
+        self.open_archive_at(path, None);
+    }
+
+    /// Open, landing in the folder `at` if it's still there.
+    pub fn open_archive_at(self: &Rc<Self>, path: PathBuf, at: Option<String>) {
         let n = self.loading.get() + 1;
         self.loading.set(n);
         let name = file_name(&path);
-        self.show_state("content-loading-symbolic", &format!("Reading {name}…"), "");
+        if at.is_none() {
+            self.show_state("content-loading-symbolic", &format!("Reading {name}…"), "");
+        }
         self.window.set_title(Some(&format!("{name} — Unleash")));
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -431,7 +506,9 @@ impl Win {
                     *w.arc.borrow_mut() = Some(Arc::new(o));
                     w.kind_pill.set_text(&type_name);
                     w.kind_pill.set_visible(true);
-                    w.cwd.set(0);
+                    let cwd = at.as_deref().and_then(|a| w.arc.borrow().as_ref().and_then(|o| o.tree.find(a))).unwrap_or(0);
+                    w.cwd.set(cwd);
+                    w.sel.unselect_all();
                     w.stack.set_visible_child_name("list");
                     w.refresh_list();
                 }
@@ -656,6 +733,7 @@ impl Win {
         self.sel.connect_selection_changed(move |_, _, _| {
             if let Some(w) = weak.upgrade() {
                 w.update_status();
+                w.update_actions();
             }
         });
     }
@@ -851,14 +929,20 @@ impl Win {
                 return false;
             }
             let (Some(w), Ok(list)) = (weak.upgrade(), v.get::<gdk::FileList>()) else { return false };
-            // adding files to an archive comes in the next milestone: for now a dropped file opens
-            match list.files().first().and_then(|f| f.path()) {
-                Some(p) if p.is_file() => {
-                    w.open_archive(p);
-                    true
-                }
-                _ => false,
+            let files: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).collect();
+            if files.is_empty() {
+                return false;
             }
+            // an archive is open: add to it. Nothing open: one archive opens, anything else
+            // becomes a new archive.
+            if w.arc.borrow().is_some() {
+                w.add_files(files);
+            } else if files.len() == 1 && files[0].is_file() && looks_like_archive(&files[0]) {
+                w.open_archive(files[0].clone());
+            } else {
+                crate::create_dialog::show(&w, files);
+            }
+            true
         });
         root.add_controller(t);
     }
@@ -914,11 +998,33 @@ impl Win {
             let base = arc.tree.nodes[self.cwd.get()].path.clone();
             (sel, base, how)
         };
-        let progress = Arc::new(Progress::default());
         let name = file_name(&arc.path);
+        let d2 = dest.clone();
+        self.run_job(
+            format!("Extracting {name}"),
+            format!("Couldn't extract {name}"),
+            move |p| backend::extract_to(&arc.path, &arc.listing, &sel, &base, &d2, how, p),
+            move |w, made| w.job_done(&made, &dest),
+        );
+    }
+
+    /// Run `work` on a worker thread with the job strip showing its progress; `done` runs on
+    /// the UI thread when it worked. Errors and cancels are shown here.
+    pub fn run_job<T: Send + 'static>(
+        self: &Rc<Self>,
+        title: String,
+        fail_title: String,
+        work: impl FnOnce(&Progress) -> Result<T, String> + Send + 'static,
+        done: impl FnOnce(&Rc<Win>, T) + 'static,
+    ) {
+        if self.job_busy.get() {
+            self.job_error("Busy", "Wait until the current job is done");
+            return;
+        }
+        let progress = Arc::new(Progress::default());
         self.job_busy.set(true);
         self.update_actions();
-        self.job_start(&format!("Extracting {name}"), progress.clone());
+        self.job_start(&title, progress.clone());
         let (weak, prog) = (Rc::downgrade(self), progress.clone());
         let ticker = glib::timeout_add_local(Duration::from_millis(100), move || {
             let Some(w) = weak.upgrade() else { return glib::ControlFlow::Break };
@@ -927,18 +1033,122 @@ impl Win {
         });
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let d2 = dest.clone();
-            let r = gio::spawn_blocking(move || backend::extract_to(&arc.path, &arc.listing, &sel, &base, &d2, how, &progress))
-                .await
-                .unwrap_or_else(|_| Err("Extracting crashed".into()));
+            let r = gio::spawn_blocking(move || work(&progress)).await.unwrap_or_else(|_| Err("It crashed".into()));
             ticker.remove();
             let Some(w) = weak.upgrade() else { return };
             w.job_busy.set(false);
             w.update_actions();
             match r {
-                Ok(made) => w.job_done(&made, &dest),
+                Ok(v) => done(&w, v),
                 Err(e) if e == backend::CANCELLED => w.job_hide(),
-                Err(e) => w.job_error(&format!("Couldn't extract {name}"), &e),
+                Err(e) => w.job_error(&fail_title, &e),
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ change the archive
+    /// Add files into the folder being browsed (asks before replacing).
+    pub fn add_files(self: &Rc<Self>, files: Vec<PathBuf>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        if files.is_empty() {
+            return;
+        }
+        if let Err(e) = modify::can_modify(&arc.listing) {
+            self.job_error("Can't add to this archive", &e);
+            return;
+        }
+        if files.iter().any(|f| *f == arc.path) {
+            self.job_error("Can't add an archive to itself", "");
+            return;
+        }
+        let base = arc.tree.nodes[self.cwd.get()].path.clone();
+        let clashes = modify::clashes(&arc.listing, &files, &base);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            if !clashes.is_empty() {
+                let names: Vec<&str> = clashes.iter().map(|c| c.rsplit('/').next().unwrap_or(c)).collect();
+                let msg = if names.len() == 1 { format!("Replace “{}”?", names[0]) } else { format!("Replace {} items?", names.len()) };
+                let detail = format!("The archive already has {}. The ones inside will be replaced by yours.", names.join(", "));
+                if !crate::confirm::ask(w.window.upcast_ref(), &msg, &detail, "Replace", false).await {
+                    return;
+                }
+            }
+            let what = if files.len() == 1 { file_name(&files[0]) } else { format!("{} items", files.len()) };
+            let arc2 = arc.clone();
+            w.run_job(
+                format!("Adding {what}"),
+                format!("Couldn't add {what}"),
+                move |p| modify::add(&arc2.path, &arc2.listing, &files, &base, p),
+                move |w, ()| {
+                    w.job_hide();
+                    w.reopen();
+                },
+            );
+        });
+    }
+
+    fn delete_selected(self: &Rc<Self>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let sel = self.selected_nodes();
+        if sel.is_empty() {
+            return;
+        }
+        if let Err(e) = modify::can_modify(&arc.listing) {
+            self.job_error("Can't delete from this archive", &e);
+            return;
+        }
+        let paths: Vec<String> = sel.iter().map(|&i| arc.tree.nodes[i].path.clone()).collect();
+        let what = if sel.len() == 1 { format!("“{}”", arc.tree.nodes[sel[0]].name) } else { format!("{} items", sel.len()) };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            let title = format!("Delete {what} from {}?", file_name(&arc.path));
+            if !crate::confirm::ask(w.window.upcast_ref(), &title, "They are removed from the archive for good. Your other files aren't touched.", "Delete", true).await {
+                return;
+            }
+            let arc2 = arc.clone();
+            w.run_job(
+                format!("Deleting {what}"),
+                format!("Couldn't delete {what}"),
+                move |p| modify::delete(&arc2.path, &arc2.listing, &paths, p),
+                move |w, ()| {
+                    w.job_hide();
+                    w.reopen();
+                },
+            );
+        });
+    }
+
+    /// Read the archive again after a change, staying in the same folder.
+    fn reopen(self: &Rc<Self>) {
+        let Some(arc) = self.arc.borrow().clone() else { return };
+        let here = arc.tree.nodes[self.cwd.get()].path.clone();
+        self.open_archive_at(arc.path.clone(), Some(here));
+    }
+
+    fn pick_files_to_add(self: &Rc<Self>) {
+        let d = gtk::FileDialog::builder().title("Add to the archive").modal(true).accept_label("Add").build();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            if let Ok(list) = d.open_multiple_future(Some(&w.window)).await {
+                let files: Vec<PathBuf> = (0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).filter_map(|f| f.path()).collect();
+                w.add_files(files);
+            }
+        });
+    }
+
+    fn pick_files_to_pack(self: &Rc<Self>) {
+        let d = gtk::FileDialog::builder().title("Files for the new archive").modal(true).accept_label("Next").build();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else { return };
+            if let Ok(list) = d.open_multiple_future(Some(&w.window)).await {
+                let files: Vec<PathBuf> = (0..list.n_items()).filter_map(|i| list.item(i).and_downcast::<gio::File>()).filter_map(|f| f.path()).collect();
+                if !files.is_empty() {
+                    crate::create_dialog::show(&w, files);
+                }
             }
         });
     }
@@ -977,7 +1187,7 @@ impl Win {
         self.job.detail.set_text(&format!("{} of {} · {}", human_size(done.min(total)), human_size(total), cur));
     }
 
-    fn job_done(self: &Rc<Self>, made: &[PathBuf], dest: &Path) {
+    pub fn job_done(self: &Rc<Self>, made: &[PathBuf], dest: &Path) {
         let j = &self.job;
         j.root.add_css_class("done");
         let what = match made {
@@ -1004,7 +1214,7 @@ impl Win {
         j.revealer.set_reveal_child(true);
     }
 
-    fn job_error(&self, title: &str, e: &str) {
+    pub fn job_error(&self, title: &str, e: &str) {
         let j = &self.job;
         j.root.remove_css_class("done");
         j.root.add_css_class("error");
@@ -1017,7 +1227,7 @@ impl Win {
         j.revealer.set_reveal_child(true);
     }
 
-    fn job_hide(&self) {
+    pub fn job_hide(&self) {
         self.job.revealer.set_reveal_child(false);
     }
 }
@@ -1055,7 +1265,13 @@ fn set_handler(b: &gtk::Button, f: impl Fn(&gtk::Button) + 'static) {
     });
 }
 
-fn file_name(p: &Path) -> String {
+/// By name only (no reading on the UI thread): "x.zip", "y.tar.gz", "z.7z.001".
+fn looks_like_archive(p: &Path) -> bool {
+    let n = file_name(p);
+    backend::stem(&n) != n
+}
+
+pub fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
 

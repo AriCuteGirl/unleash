@@ -15,6 +15,8 @@ pub enum Cmd {
     Open(Vec<PathBuf>),
     Extract { to: Option<PathBuf>, archives: Vec<PathBuf> },
     Add { format: Format, name: String, to: PathBuf, level: Level, files: Vec<PathBuf> },
+    /// `a --dialog`: let the user pick name, format and place in the New archive window
+    Pack(Vec<PathBuf>),
     Help,
     Version,
 }
@@ -29,6 +31,7 @@ pub const HELP: &str = "Usage:
       --name NAME                    archive name without extension
       --to DIR                       where to put it (default: next to the first file)
       --level fast|normal|best       (default normal)
+      --dialog                       ask for all of that in the New archive window
 ";
 
 pub fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
@@ -50,6 +53,7 @@ pub fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
     it.next();
     let (mut to, mut format, mut name, mut level, mut files) = (None, Format::Zip, None, Level::Normal, vec![]);
     let mut only_files = false;
+    let mut dialog = false;
     while let Some(a) = it.next() {
         if only_files || !a.starts_with("--") {
             files.push(abs(a));
@@ -61,6 +65,10 @@ pub fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
         };
         if key == "--" {
             only_files = true;
+            continue;
+        }
+        if sub == "a" && key == "--dialog" {
+            dialog = true;
             continue;
         }
         let mut val = || inline.clone().or_else(|| it.next().cloned()).ok_or(format!("{key} needs a value"));
@@ -87,6 +95,9 @@ pub fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
     }
     if sub == "x" {
         return Ok(Cmd::Extract { to, archives: files });
+    }
+    if dialog {
+        return Ok(Cmd::Pack(files));
     }
     let name = name.filter(|n| !n.trim().is_empty() && !n.contains('/')).unwrap_or_else(|| default_name(&files));
     let to = to.unwrap_or_else(|| files[0].parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.to_path_buf()));
@@ -156,6 +167,7 @@ mod tests {
             Cmd::Add { name, .. } => assert_eq!(name, "x"),
             c => panic!("{c:?}"),
         }
+        assert_eq!(parse(&a(&["a", "--dialog", "f", "g"]), cwd).unwrap(), Cmd::Pack(vec!["/home/u/f".into(), "/home/u/g".into()]));
         assert!(parse(&a(&["x"]), cwd).is_err());
         assert!(parse(&a(&["a", "--format", "rar", "f"]), cwd).is_err());
         assert!(parse(&a(&["x", "--bogus", "f"]), cwd).is_err());

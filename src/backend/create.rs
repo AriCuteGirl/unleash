@@ -51,7 +51,7 @@ pub enum Level {
 }
 
 /// Every file under `items` with its size (symlinks are stored as links, not followed).
-pub(super) fn walk(items: &[PathBuf]) -> Result<Vec<(PathBuf, String, fs::Metadata)>, String> {
+pub fn walk(items: &[PathBuf]) -> Result<Vec<(PathBuf, String, fs::Metadata)>, String> {
     let mut out = vec![];
     let mut stack: Vec<(PathBuf, String)> = vec![];
     for it in items.iter().rev() {

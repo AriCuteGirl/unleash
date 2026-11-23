@@ -10,7 +10,11 @@ Rust + GTK4, no libadwaita.
   overwritten: results get free names ("notes (2).txt"), and a cancelled extract leaves nothing
 - **Drag files out** into file managers, browsers, chat apps and editors (also on Wayland, see below)
 - Double-click a file to open it in its app
-- Compress files and folders to zip, 7z, tar.gz, tar.xz or tar.zst (command line for now)
+- Make new archives (New, Ctrl+N, or drop files on an empty window): zip, 7z, tar.gz, tar.xz,
+  tar.zst, with a compression level
+- Add files to an open archive (Add, or drop them on the window) and delete entries (Delete).
+  Works for zip, tar, tar.gz/xz/zst and 7z. The archive is rewritten as a new copy, read back to
+  check it, and only then swapped in, so a failure or Cancel leaves the original untouched
 - Follows the active rice live (colours, corners, shadows), or keep one rice's colours (menu → Colours)
 
 ## Command line
@@ -21,6 +25,7 @@ unleash x [--to DIR] ARCHIVE…      extract each archive next to it (or into DI
 unleash a [OPTIONS] FILE…          compress files and folders into one archive
     --format zip|7z|tar.gz|tar.xz|tar.zst   (default zip)
     --name NAME   --to DIR   --level fast|normal|best
+    --dialog      ask for name, format and place in the New archive window
 ```
 
 `x` and `a` show a small progress window and return at once (a running Unleash does the

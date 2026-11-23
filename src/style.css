@@ -289,3 +289,39 @@ progressbar.job progress {
 .job-window.done .job-title { color: @success; }
 .job-window.error .job-title { color: @danger; }
 .job-window.error .job-detail { color: @text_dim; }
+
+/* ---------------- dialogs (as in Burrow) ---------------- */
+window.dialog { background: transparent; }
+.dialog-root {
+  /* Hyprland draws the window border and shadow; drawing our own doubles them */
+  background: @bg;
+  border-radius: $R;
+  padding: 18px;
+}
+.dialog-title { font-size: 18px; font-weight: 800; color: @text; }
+.dialog-hint { font-size: 12px; color: @text_faint; }
+.field-label { font-size: 12px; font-weight: 700; color: @text_dim; }
+.ext-suffix { color: @text_faint; padding: 0 4px; }
+dropdown > button {
+  background: @bg;
+  color: @text;
+  border: 1px solid @wine;
+  border-radius: $R_SMALL;
+  box-shadow: none;
+  min-height: 30px;
+}
+dropdown > button:hover { border-color: @crimson; }
+button.folder-pick {
+  background: @surface;
+  color: @text;
+  border: 1px solid @wine;
+  border-radius: $R_SMALL;
+  box-shadow: none;
+  min-height: 30px;
+}
+button.folder-pick:hover { border-color: @crimson; }
+checkbutton check { background: @bg; border: 1px solid @crimson; border-radius: 4px; color: @on_accent; }
+checkbutton check:checked { background: @accent; border-color: @accent; }
+checkbutton { color: @text_dim; }
+.form-error { color: @danger; font-size: 12px; }
+.toolbar > separator.tool-sep { background: @wine; min-width: 1px; margin: 6px 4px; }

@@ -1,6 +1,8 @@
 mod backend;
 mod cli;
 mod config;
+mod confirm;
+mod create_dialog;
 mod drag;
 mod jobwin;
 mod looks;
@@ -42,7 +44,9 @@ fn main() -> glib::ExitCode {
         .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
     app.connect_startup(|_| drag::clean_old());
-    app.connect_activate(|app| ui::open_window(app, None));
+    app.connect_activate(|app| {
+        ui::open_window(app, None);
+    });
     app.connect_open(|app, files, _| {
         for f in files {
             ui::open_window(app, Some(f.clone()));
@@ -61,6 +65,10 @@ fn main() -> glib::ExitCode {
                 }
             }
             Ok(cli::Cmd::Extract { to, archives }) => jobwin::run(app, jobwin::Job::Extract { to, archives }),
+            Ok(cli::Cmd::Pack(files)) => {
+                let w = ui::open_window(app, None);
+                create_dialog::show(&w, files);
+            }
             Ok(cli::Cmd::Add { format, name, to, level, files }) => jobwin::run(app, jobwin::Job::Add { format, name, to, level, files }),
             Err(_) => return glib::ExitCode::FAILURE, // already reported by the caller
         }
