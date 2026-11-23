@@ -660,12 +660,6 @@ impl Win {
     }
 
     fn build_columns(self: &Rc<Self>) {
-        let folder_icon = |w: &Win| {
-            let c = theme::papirus_folder_color(&w.tokens.borrow());
-            let name = format!("folder-{c}");
-            let has = gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(&name));
-            if has { name } else { "folder".into() }
-        };
         // Name
         let f = gtk::SignalListItemFactory::new();
         f.connect_setup(|_, o| {
@@ -696,12 +690,7 @@ impl Win {
             let img = b.first_child().and_downcast::<gtk::Image>().unwrap();
             let l = img.next_sibling().and_downcast::<gtk::Label>().unwrap();
             let lock = l.next_sibling().unwrap();
-            if n.is_dir {
-                img.set_icon_name(Some(&folder_icon(&w)));
-            } else {
-                let (ct, _) = gio::content_type_guess(Some(&n.name), None);
-                img.set_from_gicon(&gio::content_type_get_icon(&ct));
-            }
+            img.set_from_gicon(&w.node_icon(n));
             l.set_text(&n.name);
             lock.set_visible(n.encrypted);
         });
@@ -771,8 +760,10 @@ impl Win {
             let Some(child) = cell.child() else { return };
             let src = gtk::DragSource::new();
             src.set_actions(gdk::DragAction::COPY | gdk::DragAction::MOVE);
-            let (cw, ww) = (cell.downgrade(), weak.clone());
-            src.connect_prepare(move |src, _, _| {
+            // what the current drag carries: set in prepare, used by begin and cancel
+            let cur: Rc<RefCell<Option<(Rc<Pending>, gio::Icon, String, usize)>>> = Rc::default();
+            let (cw, ww, c) = (cell.downgrade(), weak.clone(), cur.clone());
+            src.connect_prepare(move |_, _, _| {
                 let (w, cell) = (ww.upgrade()?, cw.upgrade()?);
                 let arc = w.arc.borrow().clone()?;
                 let mut nodes = w.selected_nodes();
@@ -783,36 +774,61 @@ impl Win {
                 }
                 let paths: Vec<String> = nodes.iter().map(|&i| arc.tree.nodes[i].path.clone()).collect();
                 let pending = w.extract_cached(&arc, paths);
-                // icon: the row's own icon, with a count for several
-                if let Some(d) = gdk::Display::default() {
-                    let theme = gtk::IconTheme::for_display(&d);
-                    let n = &arc.tree.nodes[here];
-                    let icon: gio::Icon = if nodes.len() > 1 {
-                        gio::ThemedIcon::new("edit-copy").upcast()
-                    } else if n.is_dir {
-                        gio::ThemedIcon::new("folder").upcast()
-                    } else {
-                        gio::content_type_get_icon(&gio::content_type_guess(Some(&n.name), None).0)
-                    };
-                    let p = theme.lookup_by_gicon(&icon, 48, 1, gtk::TextDirection::None, gtk::IconLookupFlags::empty());
-                    src.set_icon(Some(&p), 24, 24);
-                }
-                let (sw, pw) = (Rc::downgrade(&w), Rc::downgrade(&pending));
-                src.connect_drag_cancel(move |_, _, _| {
-                    // dropped nowhere: stop extracting if nobody has the files yet
-                    if let (Some(w), Some(p)) = (sw.upgrade(), pw.upgrade()) {
-                        if p.result().is_none() {
-                            p.cancel();
-                            w.cache.borrow_mut().retain(|_, v| !Rc::ptr_eq(v, &p));
-                        }
-                    }
-                    false
-                });
-                w.watch_pending(&pending, nodes.len(), &arc.tree.nodes[here].name);
+                let n = &arc.tree.nodes[here];
+                let icon = w.node_icon(n);
+                w.watch_pending(&pending, nodes.len(), &n.name);
+                *c.borrow_mut() = Some((pending.clone(), icon, n.name.clone(), nodes.len()));
                 Some(LazyFiles::new(pending).upcast())
+            });
+            // the thing under the cursor while dragging: icon + name, like file managers do
+            let c = cur.clone();
+            src.connect_drag_begin(move |_, drag| {
+                let Some((_, icon, name, count)) = c.borrow().clone() else { return };
+                let chip = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                chip.add_css_class("drag-chip");
+                let overlay = gtk::Overlay::new();
+                let img = gtk::Image::from_gicon(&icon);
+                img.set_pixel_size(32);
+                overlay.set_child(Some(&img));
+                if count > 1 {
+                    let badge = gtk::Label::new(Some(&count.to_string()));
+                    badge.add_css_class("badge");
+                    badge.set_halign(gtk::Align::End);
+                    badge.set_valign(gtk::Align::End);
+                    overlay.add_overlay(&badge);
+                }
+                chip.append(&overlay);
+                let text = if count > 1 { format!("{name} and {} more", count - 1) } else { name };
+                let l = gtk::Label::new(Some(&text));
+                l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                l.set_max_width_chars(32);
+                chip.append(&l);
+                gtk::DragIcon::for_drag(drag).set_child(Some(&chip));
+                // a little below-right of the pointer, so the drop spot stays visible
+                drag.set_hotspot(-14, -14);
+            });
+            let (c, ww) = (cur, weak.clone());
+            src.connect_drag_cancel(move |_, _, _| {
+                // dropped nowhere: stop extracting if nobody has the files yet
+                if let (Some(w), Some((p, ..))) = (ww.upgrade(), c.borrow_mut().take()) {
+                    if p.result().is_none() {
+                        p.cancel();
+                        w.cache.borrow_mut().retain(|_, v| !Rc::ptr_eq(v, &p));
+                    }
+                }
+                false
             });
             child.add_controller(src);
         });
+    }
+
+    /// The same icon the list shows: a rice-coloured folder, or the file type's icon.
+    fn node_icon(&self, n: &crate::tree::Node) -> gio::Icon {
+        if n.is_dir {
+            let c = theme::papirus_folder_color(&self.tokens.borrow());
+            return gio::ThemedIcon::from_names(&[&format!("folder-{c}"), "folder"]).upcast();
+        }
+        gio::content_type_get_icon(&gio::content_type_guess(Some(&n.name), None).0)
     }
 
     /// Start (or reuse) extracting `paths` into the drag cache.

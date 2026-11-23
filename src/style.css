@@ -272,3 +272,12 @@ progressbar.job progress {
   color: @text;
   font-weight: 600;
 }
+.drag-chip .badge {
+  background: @accent_hot;
+  color: @on_accent;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  min-width: 10px;
+}
